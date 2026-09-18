@@ -1,0 +1,30 @@
+name: Documentation
+description: Docs, READMEs, runbooks, comments.
+title: "[docs] "
+labels:
+  - type:docs
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What needs documenting?
+    validations:
+      required: true
+  - type: textarea
+    id: where
+    attributes:
+      label: Where does it go?
+      description: File path, wiki page, or section.
+    validations:
+      required: false
+  - type: dropdown
+    id: audience
+    attributes:
+      label: Audience
+      options:
+        - end-users
+        - operators
+        - developers
+        - all
+    validations:
+      required: false

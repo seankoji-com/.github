@@ -1,0 +1,36 @@
+name: Reusable Link Checker
+
+on:
+  workflow_call:
+    inputs:
+      config-file:
+        description: 'Path to lychee config file'
+        type: string
+        default: '.lychee.toml'
+      args:
+        description: 'Additional lychee arguments'
+        type: string
+        default: '--verbose --no-progress "./**/*.md"'
+      runner-json:
+        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  link-checker:
+    name: Check Links
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Run Lychee Link Checker
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2
+        with:
+          args: ${{ inputs.args }}
+          config: ${{ inputs.config-file }}
+          fail: true

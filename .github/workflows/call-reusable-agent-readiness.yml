@@ -1,0 +1,23 @@
+# Agent Readiness — hand-maintained hub copy of panel/call-reusable-agent-readiness.yml.
+# The distributor skips the .github repo, and this copy deliberately uses the
+# same-commit relative form so a PR that edits the checker or the reusable
+# workflow is scored by its own version, not by main's.
+name: Agent Readiness
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-readiness-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  agent-readiness:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    uses: ./.github/workflows/reusable-agent-readiness.yml
+    with:
+      runner-json: '["ubuntu-latest"]'

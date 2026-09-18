@@ -1,0 +1,63 @@
+name: Reusable PR Gatekeeper
+
+# Posts the single aggregator check run `gatekeeper / all-checks-passed` for a
+# commit. It blocks on ANY red check, not only the ones a repo happens to have
+# listed as required. This closes the gap where an unlisted failing check can
+# otherwise be ignored by branch protection.
+#
+# The check run is created by the CALLER repo's own GITHUB_TOKEN, never by the
+# organization CI App: two identities posting the same check name yields two
+# check runs with that name and makes the ruleset's context match ambiguous.
+# The evaluator is fetched from the same immutable revision as this public
+# reusable workflow.
+
+on:
+  workflow_call:
+    inputs:
+      head_sha:
+        description: 'Commit SHA to evaluate and report the gate against.'
+        required: true
+        type: string
+      runner-json:
+        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        type: string
+        default: '["ubuntu-latest"]'
+
+# Inherit the caller's explicit token permissions. Requiring a new scope here
+# before fleet callers receive it would make older callers fail to resolve.
+# Updated callers grant statuses: read; older callers still fail closed on an
+# unreadable status API without turning a permission rollout into a syntax error.
+
+jobs:
+  all-checks-passed:
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 10
+    steps:
+      - name: Stage the evaluator
+        env:
+          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+        run: |
+          REF="main"
+          if [ -n "${JOB_WORKFLOW_SHA}" ]; then
+            if ! echo "${JOB_WORKFLOW_SHA}" | grep -qE '^[0-9a-f]{40}$'; then
+              echo "::error::Invalid job_workflow_sha format: ${JOB_WORKFLOW_SHA}"
+              exit 1
+            fi
+            REF="${JOB_WORKFLOW_SHA}"
+          fi
+          curl -fsS \
+            "https://raw.githubusercontent.com/seankoji-com/.github/${REF}/scripts/pr-gatekeeper.py" \
+            -o "${RUNNER_TEMP}/pr-gatekeeper.py" \
+            || { echo "::error::failed to fetch pr-gatekeeper.py at ref ${REF}"; exit 1; }
+          [ -s "${RUNNER_TEMP}/pr-gatekeeper.py" ] || {
+            echo "::error::fetched pr-gatekeeper.py is empty"; exit 1;
+          }
+
+      - name: Evaluate and post the gate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+        run: |
+          python3 "${RUNNER_TEMP}/pr-gatekeeper.py" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --sha "${HEAD_SHA}"

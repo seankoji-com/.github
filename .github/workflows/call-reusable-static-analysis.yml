@@ -1,0 +1,29 @@
+# Static Analysis — synced from seankoji-com/.github (.github/workflows/call-reusable-static-analysis.yml)
+# Runs Semgrep and zizmor against every PR via the reusable workflow. This is
+# the hub's own local activation only — the fleet-wide caller
+# (panel/call-reusable-static-analysis.yml) is a deferred, explicit operator
+# step; the distributor skips `.github` itself, so this repo needs its own
+# copy to exercise the reusable workflow on its own PRs.
+name: Static Analysis
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Every push to a PR queues a fresh scan; without this, rapid successive
+# pushes (force-push loops, auto-rebase branches) stack up several full runs
+# of the same diff on the shared self-hosted pool. Cancel in favor of the
+# latest push — an in-flight scan of a superseded commit has no value.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  static-analysis:
+    # Same-commit relative form, not `@main`: `main` has no
+    # reusable-static-analysis.yml until this PR merges, so `@main` cannot
+    # resolve on this PR's own commits and would produce a red "workflow was
+    # not found" check on the very PR that introduces it.
+    uses: ./.github/workflows/reusable-static-analysis.yml
+    with:
+      runner-json: '["ubuntu-latest"]'

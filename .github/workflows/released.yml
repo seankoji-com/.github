@@ -1,0 +1,75 @@
+name: Reusable Released-to-Prod Marker
+
+# Standard "released to prod" signal, called after a repository's deployment
+# succeeds. It creates a Deployment for the requested commit and immediately
+# marks it successful, which emits the standard `deployment_status` event.
+#
+# The token used is the default job GITHUB_TOKEN, scoped by `workflow_call`
+# semantics to the CALLING repository — the deployment is always created
+# against the caller's own repo, so no cross-repo GitHub App token is needed
+# here. The caller must grant `deployments: write` because the organization
+# default is read-only.
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: 'Commit SHA that was deployed. Defaults to the calling job''s github.sha when omitted or empty.'
+        type: string
+        default: ''
+      environment:
+        description: 'Deployment environment name'
+        type: string
+        default: 'prod'
+      description:
+        description: 'Optional human-readable description recorded on the deployment and its status'
+        type: string
+        default: 'Released via seankoji-com/.github released.yml'
+      runner-json:
+        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  contents: read
+  deployments: write
+
+jobs:
+  mark-released:
+    name: Mark released to ${{ inputs.environment }}
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    steps:
+      - name: Create deployment and success status
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const sha = ('${{ inputs.sha }}'.trim()) || context.sha;
+            const environment = '${{ inputs.environment }}';
+            const description = '${{ inputs.description }}';
+
+            const deployment = await github.rest.repos.createDeployment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: sha,
+              environment,
+              auto_merge: false,
+              required_contexts: [],
+              description,
+            });
+
+            const deploymentId = deployment.data && deployment.data.id;
+            if (!deploymentId) {
+              core.setFailed(`Deployment creation did not return an id (status ${deployment.status}): ${JSON.stringify(deployment.data)}`);
+              return;
+            }
+
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: deploymentId,
+              state: 'success',
+              description,
+              environment,
+            });
+
+            core.info(`Marked ${sha} as released to ${environment} (deployment ${deploymentId}).`);

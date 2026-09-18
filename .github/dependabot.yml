@@ -1,0 +1,17 @@
+# Dependabot version updates for this repository. Each consuming repository
+# still needs its own ecosystem-specific .github/dependabot.yml.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "type:chore"
+      - "dependencies"
+    groups:
+      actions-minor-and-patch:
+        update-types:
+          - minor
+          - patch

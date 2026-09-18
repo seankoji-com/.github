@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+"""Unit tests for scripts/pr-gatekeeper.py.
+
+No network: `evaluate()` is pure, so every case here is a hand-built payload.
+The cases are the ones that would each, on their own, lock merges org-wide or
+let a red PR through.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import unittest
+from unittest.mock import patch, MagicMock
+import urllib.error
+from pathlib import Path
+
+_SPEC = importlib.util.spec_from_file_location(
+    "pr_gatekeeper",
+    Path(__file__).resolve().parent.parent / "scripts" / "pr-gatekeeper.py",
+)
+pr_gatekeeper = importlib.util.module_from_spec(_SPEC)
+sys.modules["pr_gatekeeper"] = pr_gatekeeper
+_SPEC.loader.exec_module(pr_gatekeeper)
+
+GATE_CHECK_NAME = pr_gatekeeper.GATE_CHECK_NAME
+evaluate = pr_gatekeeper.evaluate
+
+EMPTY_STATUSES = {"state": "pending", "total_count": 0, "statuses": []}
+
+
+def run(
+    name: str,
+    *,
+    status: str = "completed",
+    conclusion: str | None = "success",
+    app_id: int = 15368,
+    run_id: int = 1,
+    started_at: str = "2026-09-01T00:00:00Z",
+) -> dict:
+    return {
+        "id": run_id,
+        "name": name,
+        "status": status,
+        "conclusion": conclusion,
+        "started_at": started_at,
+        "app": {"id": app_id, "slug": "github-actions"},
+    }
+
+
+def suite(runs_count: int, status: str = "completed", suite_id: int = 900) -> dict:
+    return {
+        "id": suite_id,
+        "status": status,
+        "latest_check_runs_count": runs_count,
+        "app": {"slug": "github-actions"},
+    }
+
+
+class TestBlocking(unittest.TestCase):
+    """The gate must catch red checks absent from a required-context list."""
+
+    def test_red_check_absent_from_any_required_list_fails(self):
+        status, conclusion, title, summary = evaluate(
+            [
+                run("build, lint, typecheck, test"),
+                run("Playwright and pgTAP", conclusion="failure", run_id=2),
+            ],
+            EMPTY_STATUSES,
+            [suite(2)],
+        )
+        self.assertEqual((status, conclusion), ("completed", "failure"))
+        self.assertIn("Playwright and pgTAP", summary)
+        self.assertIn("1 check", title)
+
+    def test_unknown_conclusion_blocks(self):
+        """Allowlist, not denylist: a conclusion GitHub adds later must block."""
+        status, conclusion, _, _ = evaluate(
+            [run("future", conclusion="quantum_undecided")], EMPTY_STATUSES, []
+        )
+        self.assertEqual((status, conclusion), ("completed", "failure"))
+
+    def test_cancelled_timed_out_and_action_required_all_block(self):
+        for bad in ("cancelled", "timed_out", "action_required", "failure", None):
+            with self.subTest(conclusion=bad):
+                status, conclusion, _, _ = evaluate(
+                    [run("x", conclusion=bad)], EMPTY_STATUSES, []
+                )
+                self.assertEqual((status, conclusion), ("completed", "failure"))
+
+    def test_skipped_neutral_stale_do_not_block(self):
+        status, conclusion, _, _ = evaluate(
+            [
+                run("a", conclusion="skipped"),
+                run("b", conclusion="neutral", run_id=2),
+                run("c", conclusion="stale", run_id=3),
+                run("d", conclusion="success", run_id=4),
+            ],
+            EMPTY_STATUSES,
+            [suite(4)],
+        )
+        self.assertEqual((status, conclusion), ("completed", "success"))
+
+
+class TestPending(unittest.TestCase):
+    def test_pending_check_is_in_progress_with_no_conclusion(self):
+        """`conclusion` must be None here. Any conclusion at all forces
+        status=completed server-side, so 'in_progress' as a conclusion is a
+        422 on every still-running PR."""
+        status, conclusion, _, _ = evaluate(
+            [run("slow", status="in_progress", conclusion=None)],
+            EMPTY_STATUSES,
+            [suite(1, status="in_progress")],
+        )
+        self.assertEqual(status, "in_progress")
+        self.assertIsNone(conclusion)
+
+    def test_pending_never_reports_success(self):
+        status, conclusion, _, _ = evaluate(
+            [run("done"), run("queued one", status="queued", conclusion=None, run_id=2)],
+            EMPTY_STATUSES,
+            [],
+        )
+        self.assertNotEqual(conclusion, "success")
+        self.assertEqual((status, conclusion), ("in_progress", None))
+
+    def test_failure_wins_over_pending(self):
+        status, conclusion, _, _ = evaluate(
+            [
+                run("red", conclusion="failure"),
+                run("slow", status="in_progress", conclusion=None, run_id=2),
+            ],
+            EMPTY_STATUSES,
+            [],
+        )
+        self.assertEqual((status, conclusion), ("completed", "failure"))
+
+
+class TestSelfExclusion(unittest.TestCase):
+    def test_gate_excludes_its_own_check_run(self):
+        """Left in, the gate's own in_progress run would hold itself open
+        forever, and its own previous failure would pin itself red."""
+        status, conclusion, _, _ = evaluate(
+            [
+                run("real check"),
+                run(GATE_CHECK_NAME, status="in_progress", conclusion=None, run_id=2),
+                run(GATE_CHECK_NAME, conclusion="failure", run_id=3),
+            ],
+            EMPTY_STATUSES,
+            [],
+        )
+        self.assertEqual((status, conclusion), ("completed", "success"))
+
+    def test_gate_excludes_its_own_running_suite(self):
+        gate = run(GATE_CHECK_NAME, status="in_progress", conclusion=None, run_id=2)
+        gate["check_suite"] = {"id": 901}
+        status, conclusion, _, _ = evaluate(
+            [run("real check"), gate],
+            EMPTY_STATUSES,
+            [suite(1, status="in_progress", suite_id=901)],
+        )
+        self.assertEqual((status, conclusion), ("completed", "success"))
+
+
+class TestDedupe(unittest.TestCase):
+    def test_same_named_workflows_do_not_hide_a_failure(self):
+        failed = run("test", conclusion="failure", run_id=1)
+        passed = run("test", run_id=2)
+        failed["check_suite"] = {"id": 10}
+        passed["check_suite"] = {"id": 20}
+        self.assertEqual(evaluate([failed, passed], EMPTY_STATUSES, [])[1], "failure")
+
+    def test_same_app_and_name_counts_only_the_latest(self):
+        """'Re-run failed jobs' leaves the stale failure beside the new
+        success; counting both pins the gate red permanently."""
+        status, conclusion, _, _ = evaluate(
+            [
+                run(
+                    "build",
+                    conclusion="failure",
+                    run_id=1,
+                    started_at="2026-09-01T00:00:00Z",
+                ),
+                run(
+                    "build",
+                    conclusion="success",
+                    run_id=2,
+                    started_at="2026-09-01T01:00:00Z",
+                ),
+            ],
+            EMPTY_STATUSES,
+            [],
+        )
+        self.assertEqual((status, conclusion), ("completed", "success"))
+
+    def test_same_name_from_different_apps_is_not_deduped(self):
+        status, conclusion, _, _ = evaluate(
+            [
+                run("build", conclusion="success", app_id=1, run_id=1),
+                run("build", conclusion="failure", app_id=2, run_id=2),
+            ],
+            EMPTY_STATUSES,
+            [],
+        )
+        self.assertEqual((status, conclusion), ("completed", "failure"))
+
+
+class TestRecovery(unittest.TestCase):
+    def test_http_error_records_failed_get_path(self):
+        error = urllib.error.HTTPError("https://api.github.com/test", 403, "forbidden", {}, None)
+        with patch.object(pr_gatekeeper.urllib.request, "urlopen", side_effect=error):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                pr_gatekeeper._get("/test", "fake")
+        self.assertEqual(caught.exception.request_path, "/test")
+
+    def test_transient_http_retried_but_auth_not_retried(self):
+        for code, calls in ((503, 2), (403, 1)):
+            response = MagicMock()
+            response.__enter__.return_value.read.return_value = b'{}'
+            failure = urllib.error.HTTPError("https://api.github.com/test", code, "failed", {}, None)
+            with patch.object(pr_gatekeeper.urllib.request, "urlopen", side_effect=[failure, response]) as request, patch.object(pr_gatekeeper.time, "sleep"):
+                if code == 403:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        pr_gatekeeper._get("/test", "fake")
+                else:
+                    self.assertEqual(pr_gatekeeper._get("/test", "fake"), {})
+                self.assertEqual(request.call_count, calls)
+
+    def test_read_failure_posts_visible_failure_on_pr(self):
+        for error in (ValueError("malformed response"), urllib.error.URLError("timeout")):
+            with patch.object(pr_gatekeeper, "collect", side_effect=error), patch.object(pr_gatekeeper, "_post") as post:
+                self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake"), 0)
+                body = post.call_args.args[2]
+                self.assertEqual(body["head_sha"], "abc")
+                self.assertEqual(body["conclusion"], "failure")
+
+    def test_malformed_check_payload_is_not_green(self):
+        for payload in ([], {}, {"check_runs": ["invalid"]}):
+            with patch.object(pr_gatekeeper, "_get", return_value=payload):
+                with self.assertRaises(ValueError):
+                    pr_gatekeeper.collect("demo/repo", "abc", "fake")
+
+    def test_status_pagination_preserves_failure_on_second_page(self):
+        first = {"total_count": 101, "statuses": [{"context": str(i), "state": "success"} for i in range(100)]}
+        second = {"total_count": 101, "statuses": [{"context": "late", "state": "failure"}]}
+        with patch.object(pr_gatekeeper, "_get", side_effect=[{"check_runs": []}, first, second, {"check_suites": []}]):
+            runs, statuses, suites = pr_gatekeeper.collect("demo/repo", "abc", "fake")
+            self.assertEqual(evaluate(runs, statuses, suites)[1], "failure")
+
+    def test_sha_read_falls_back_to_matching_open_pr_branch(self):
+        missing = urllib.error.HTTPError("https://api.github.com/test", 422, "missing", {}, None)
+        with patch.object(
+            pr_gatekeeper,
+            "_get",
+            side_effect=[
+                missing,
+                [{"head": {"sha": "abc", "ref": "codex/fix gate"}}],
+                {"check_runs": []},
+                EMPTY_STATUSES,
+                {"check_suites": []},
+            ],
+        ) as get:
+            self.assertEqual(pr_gatekeeper.collect("demo/repo", "abc", "fake"), ([], EMPTY_STATUSES, []))
+        self.assertIn("commits/codex%2Ffix%20gate/check-runs", get.call_args_list[2].args[0])
+
+    def test_sha_read_raises_when_no_open_pr_matches(self):
+        missing = urllib.error.HTTPError("https://api.github.com/test", 422, "missing", {}, None)
+        with patch.object(pr_gatekeeper, "_get", side_effect=[missing, []]):
+            with self.assertRaises(urllib.error.HTTPError):
+                pr_gatekeeper.collect("demo/repo", "abc", "fake")
+
+    def test_scheduled_reconcile_recovers_late_external_check(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), patch.object(pr_gatekeeper, "_get", return_value=[{"head": {"sha": "abc"}}]), patch.object(pr_gatekeeper, "collect", side_effect=[([run("external", status="in_progress", conclusion=None)], EMPTY_STATUSES, []), ([run("external")], EMPTY_STATUSES, [])]), patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+            self.assertEqual(post.call_args.args[2]["status"], "in_progress")
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+            self.assertEqual(post.call_args.args[2]["conclusion"], "success")
+
+    def test_reconcile_continues_after_one_post_failure(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), patch.object(pr_gatekeeper, "_get", return_value=[{"head": {"sha": "a"}}, {"head": {"sha": "b"}}]), patch.object(pr_gatekeeper, "report", side_effect=[2, 0]) as report:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 2)
+            self.assertEqual(report.call_count, 2)
+
+
+class TestCommitStatuses(unittest.TestCase):
+    def test_total_count_zero_is_not_pending(self):
+        """GitHub reports state 'pending' on an empty statuses response. No
+        repo in this org uses commit statuses, so reading the state rather
+        than the count would hold every PR open forever."""
+        status, conclusion, _, _ = evaluate(
+            [run("build")],
+            {"state": "pending", "total_count": 0, "statuses": []},
+            [],
+        )
+        self.assertEqual((status, conclusion), ("completed", "success"))
+
+    def test_failing_status_blocks(self):
+        status, conclusion, _, summary = evaluate(
+            [run("build")],
+            {
+                "state": "failure",
+                "total_count": 1,
+                "statuses": [{"context": "vercel", "state": "failure"}],
+            },
+            [],
+        )
+        self.assertEqual((status, conclusion), ("completed", "failure"))
+        self.assertIn("vercel", summary)
+
+    def test_real_pending_status_holds_the_gate(self):
+        status, conclusion, _, _ = evaluate(
+            [run("build")],
+            {
+                "state": "pending",
+                "total_count": 1,
+                "statuses": [{"context": "vercel", "state": "pending"}],
+            },
+            [],
+        )
+        self.assertEqual((status, conclusion), ("in_progress", None))
+
+
+class TestSuiteQuiescence(unittest.TestCase):
+    def test_suite_with_zero_runs_is_ignored(self):
+        """`vercel` and `claude` suites sit at queued / zero runs permanently.
+        Requiring every suite to be completed blocks every PR in the org."""
+        status, conclusion, _, _ = evaluate(
+            [run("build")],
+            EMPTY_STATUSES,
+            [suite(0, status="queued", suite_id=1), suite(1, suite_id=2)],
+        )
+        self.assertEqual((status, conclusion), ("completed", "success"))
+
+    def test_suite_with_runs_outstanding_forces_in_progress(self):
+        status, conclusion, _, _ = evaluate(
+            [run("build")],
+            EMPTY_STATUSES,
+            [suite(0, status="queued", suite_id=1), suite(2, status="queued", suite_id=2)],
+        )
+        self.assertEqual((status, conclusion), ("in_progress", None))
+
+
+class TestEmpty(unittest.TestCase):
+    def test_nothing_at_all_is_success(self):
+        """A docs-only PR with no applicable checks. Resolved by the
+        reconciler dispatching, not by a timer."""
+        status, conclusion, _, _ = evaluate([], EMPTY_STATUSES, [])
+        self.assertEqual((status, conclusion), ("completed", "success"))
+
+    def test_conclusion_is_none_whenever_status_is_not_completed(self):
+        cases = [
+            ([run("a", status="queued", conclusion=None)], EMPTY_STATUSES, []),
+            ([run("a")], EMPTY_STATUSES, [suite(1, status="pending")]),
+            (
+                [run("a")],
+                {
+                    "state": "pending",
+                    "total_count": 1,
+                    "statuses": [{"context": "c", "state": "pending"}],
+                },
+                [],
+            ),
+        ]
+        for runs, statuses, suites in cases:
+            with self.subTest(runs=runs):
+                status, conclusion, _, _ = evaluate(runs, statuses, suites)
+                if status != "completed":
+                    self.assertIsNone(conclusion)
+
+
+class TestPendingOverridesTerminal(unittest.TestCase):
+    """An in_progress verdict always posts, even over an earlier terminal gate.
+
+    The gate reads fresh check state on every run, so a pending check at
+    evaluation time is genuinely outstanding. Suppressing the in_progress to
+    protect an earlier `completed` gate would let a PR merge while that check is
+    still in flight, and its later failure would land after the merge. The
+    caller's `queue: max` is what fixes the original frozen-gate bug; no
+    monotonic guard belongs here.
+    """
+
+    def test_in_progress_posts_over_an_earlier_completed_gate(self):
+        completed_gate = run(GATE_CHECK_NAME, run_id=1)
+        pending = run("slow", status="in_progress", conclusion=None, run_id=2)
+        with patch.object(pr_gatekeeper, "collect", return_value=([completed_gate, pending], EMPTY_STATUSES, [])), patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake"), 0)
+            self.assertEqual(post.call_args.args[2]["status"], "in_progress")
+
+    def test_in_progress_republishes_over_an_earlier_in_progress_gate(self):
+        prior_gate = run(GATE_CHECK_NAME, status="in_progress", conclusion=None, run_id=1)
+        pending = run("slow", status="in_progress", conclusion=None, run_id=2)
+        with patch.object(pr_gatekeeper, "collect", return_value=([prior_gate, pending], EMPTY_STATUSES, [])), patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("demo/repo", "abc", "fake")
+            self.assertEqual(post.call_args.args[2]["status"], "in_progress")
+
+    def test_in_progress_posts_when_no_gate_exists(self):
+        pending = run("slow", status="in_progress", conclusion=None)
+        with patch.object(pr_gatekeeper, "collect", return_value=([pending], EMPTY_STATUSES, [])), patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("demo/repo", "abc", "fake")
+            body = post.call_args.args[2]
+            self.assertEqual(body["status"], "in_progress")
+            self.assertNotIn("conclusion", body)
+
+    def test_terminal_verdict_posts(self):
+        failed_gate = run(GATE_CHECK_NAME, conclusion="failure", run_id=1)
+        green = run("build", run_id=2)
+        with patch.object(pr_gatekeeper, "collect", return_value=([failed_gate, green], EMPTY_STATUSES, [])), patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("demo/repo", "abc", "fake")
+            self.assertEqual(post.call_args.args[2]["conclusion"], "success")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -1,0 +1,49 @@
+name: Feature
+description: New capability or improvement.
+title: "[feature] "
+labels:
+  - type:feature
+body:
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Complexity
+      description: Best-guess effort level — used for model routing.
+      options:
+        - trivial - one-liner
+        - low - small, single-area
+        - medium - multi-step but scoped
+        - hard - complex or deep investigation
+    validations:
+      required: false
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P1 - same-week
+        - P2 - this-month
+        - P3 - backlog
+    validations:
+      required: false
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: Describe the feature or change.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: What problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How do we know it's done?
+    validations:
+      required: false

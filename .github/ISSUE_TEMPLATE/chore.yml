@@ -1,0 +1,37 @@
+name: Chore
+description: Maintenance, refactoring, or tooling with no user-facing change.
+title: "[chore] "
+labels:
+  - type:chore
+body:
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Complexity
+      options:
+        - trivial - one-liner
+        - low - small, single-area
+        - medium - multi-step but scoped
+        - hard - complex or deep investigation
+    validations:
+      required: false
+  - type: textarea
+    id: what
+    attributes:
+      label: What needs doing?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why now?
+      description: What's the trigger or deadline?
+    validations:
+      required: false
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risk / side-effects
+      description: Anything that could break or surprise people?
+    validations:
+      required: false

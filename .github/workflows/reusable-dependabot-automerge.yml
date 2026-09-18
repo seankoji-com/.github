@@ -1,0 +1,52 @@
+name: Reusable Dependabot Auto-Merge
+
+on:
+  workflow_call:
+    inputs:
+      runner-json:
+        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        type: string
+        default: '["ubuntu-latest"]'
+
+jobs:
+  auto-merge:
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 5
+    # Gate on the PR AUTHOR, not github.actor. `actor` changes with whoever
+    # triggered the event, so a human reopen/re-run of a Dependabot PR — the
+    # usual way to recover a red run after a fix — would skip this job and
+    # leave gatekeeper red. The author is dependabot[bot] for the PR's life.
+    if: >-
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SEANKOJI_CI_APP_ID }}
+          private-key: ${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}
+
+      # Classify the update from Dependabot's own metadata, never from the PR
+      # title/body interpolated into the shell. A Dependabot changelog body
+      # contains backticks and `$(...)`, which the shell executes as command
+      # substitution: `body="${{ github.event.pull_request.body }}"` failed every
+      # run with exit 127 (`@dependabot: command not found`) before the merge was
+      # attempted. Title parsing also misclassifies ordinary patch and minor
+      # bumps, so the workflow uses Dependabot's typed metadata instead.
+      - name: Read Dependabot update metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+
+      - name: Enable auto-merge for patch and minor updates
+        if: >-
+          steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
+          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr merge --auto --squash "$PR_URL"
+          echo "Auto-merge enabled; it will merge when all required checks pass."

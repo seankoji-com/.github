@@ -1,0 +1,66 @@
+name: Bug
+description: Report behavior that differs from the intended result.
+title: "[bug] "
+labels:
+  - type:bug
+body:
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P1 - same-week fix
+        - P2 - this-month fix
+        - P3 - backlog
+    validations:
+      required: true
+  - type: dropdown
+    id: complexity
+    attributes:
+      label: Complexity
+      description: Best-guess effort level used for planning.
+      options:
+        - trivial - one-liner
+        - low - small, single-area
+        - medium - multi-step but scoped
+        - hard - complex or deep investigation
+    validations:
+      required: false
+  - type: textarea
+    id: what
+    attributes:
+      label: What is broken?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: false
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety check
+      description: Remove secrets, personal data, private hostnames, and private logs before submitting.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Context / logs
+      description: Relevant log lines, Grafana panel, container name, host.
+    validations:
+      required: false

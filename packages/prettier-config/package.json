@@ -1,0 +1,10 @@
+{
+  "name": "@seankoji-com/prettier-config",
+  "version": "1.0.0",
+  "description": "Org-wide standard Prettier config for seankoji-com",
+  "type": "module",
+  "main": "index.json",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}

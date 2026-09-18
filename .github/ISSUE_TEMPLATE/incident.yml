@@ -1,0 +1,44 @@
+name: Incident
+description: Report an active production incident.
+title: "[incident] "
+labels:
+  - type:incident
+body:
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - SEV1 - complete outage, users impacted
+        - SEV2 - degraded, workaround exists
+        - SEV3 - minor, low or no user impact
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What's happening?
+      description: What are users seeing?
+    validations:
+      required: true
+  - type: textarea
+    id: when
+    attributes:
+      label: When did it start?
+      description: Approximate time (UTC) and how was it detected?
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Affected services, repos, regions, users.
+    validations:
+      required: false
+  - type: textarea
+    id: links
+    attributes:
+      label: Links
+      description: Public dashboards, sanitized logs, Sentry issues, or related PRs. Do not include secrets or private infrastructure details.
+    validations:
+      required: false

@@ -1,0 +1,76 @@
+name: Reusable Issue Triage & PR Sync
+
+on:
+  workflow_call:
+    inputs:
+      triage-label:
+        description: 'Label to apply on new issues needing triage'
+        type: string
+        default: 'needs-triage'
+      bypass-label:
+        description: 'Label that bypasses triage labeling'
+        type: string
+        default: 'ready'
+      runner-json:
+        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  triage-issue:
+    name: Auto-label New Issue
+    if: github.event_name == 'issues' && github.event.action == 'opened'
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    steps:
+      - name: Add triage label
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const number = context.payload.issue.number;
+            const labels = (context.payload.issue.labels ?? []).map(l => l.name);
+            const bypass = '${{ inputs.bypass-label }}';
+            const triage = '${{ inputs.triage-label }}';
+            
+            if (labels.includes(bypass)) {
+              core.info(`#${number} already has "${bypass}"; skipping "${triage}".`);
+              return;
+            }
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: number,
+              labels: [triage],
+            });
+            core.info(`Added "${triage}" to #${number}.`);
+
+  link-pr:
+    name: Auto-label Issue with Linked PR
+    if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize')
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    steps:
+      - name: Mark referenced issue as having PR
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        with:
+          script: |
+            const prBody = context.payload.pull_request.body || '';
+            const issueMatches = prBody.match(/(?:closes|fixes|resolves|refs)\s+#(\d+)/gi);
+            if (!issueMatches) return;
+            
+            for (const match of issueMatches) {
+              const issueNum = match.match(/\d+/)[0];
+              try {
+                await github.rest.issues.addLabels({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: parseInt(issueNum, 10),
+                  labels: ['has-pr'],
+                });
+                core.info(`Added "has-pr" to issue #${issueNum}`);
+              } catch (err) {
+                core.warning(`Could not label issue #${issueNum}: ${err.message}`);
+              }
+            }

@@ -1,0 +1,21 @@
+{
+  "name": "@seankoji-com/eslint-config",
+  "version": "1.0.0",
+  "description": "Org-wide standard ESLint flat config for seankoji-com",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "peerDependencies": {
+    "eslint": "^9.0.0 || ^10.0.0",
+    "typescript-eslint": "^8.0.0"
+  },
+  "dependencies": {
+    "@eslint/js": "^10.0.0",
+    "eslint-plugin-prettier": "^5.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  }
+}

@@ -1,0 +1,154 @@
+name: Reusable Static Analysis
+
+# Runs Semgrep and zizmor against the checked-out PR content. The caller chooses
+# the runner. Public repositories must use the GitHub-hosted default.
+#
+# Non-blocking by design: both the install and scan step in each job carry
+# `continue-on-error: true`, so a tool failure never turns the check run red.
+# Each job's final `if: always()` step records PASS/SCANNED vs.
+# INSTALL-FAILED/NO-OUTPUT in the step summary so an install failure can never
+# look identical to a clean scan with no findings.
+
+on:
+  workflow_call:
+    inputs:
+      runner-json:
+        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        type: string
+        default: '["ubuntu-latest"]'
+
+# A reusable workflow can never hold more than its caller, so the caller must
+# not declare a narrower `permissions:` block than this.
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: semgrep
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Self-hosted containers don't preinstall semgrep; --user installs may
+      # not land on PATH, so follow test.yml's --break-system-packages pattern.
+      - name: Install Semgrep
+        id: install
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          python3 -m pip install --quiet --break-system-packages "semgrep==1.176.0" \
+            || python3 -m pip install --quiet "semgrep==1.176.0"
+
+      - name: Run Semgrep scan
+        id: scan
+        continue-on-error: true
+        env:
+          SEMGREP_SEND_METRICS: 'off'
+        run: |
+          set -uo pipefail
+          semgrep scan --config p/security-audit --config p/secrets \
+            --metrics=off --json --output semgrep-results.json .
+
+      # No bare `set -e`: this is the only step in the job not covered by
+      # continue-on-error, so a broken result file must never fail the job.
+      - name: Record scan outcome
+        if: always()
+        run: |
+          if ! jq -e '.results | type == "array"' semgrep-results.json >/dev/null 2>&1; then
+            echo "::warning::Semgrep did not produce valid scan output; inspect install/scan logs."
+          fi
+          {
+            echo "### Semgrep"
+            if [ -f semgrep-results.json ]; then
+              count="$(jq '.results | length' semgrep-results.json 2>/dev/null || true)"
+              if [ -n "${count:-}" ]; then
+                echo "- SCANNED: ${count} finding(s) (see artifact \`semgrep-results\` for detail)"
+              else
+                echo "- SCANNED: output file present but could not be parsed as JSON"
+              fi
+            else
+              echo "- INSTALL-FAILED or NO-OUTPUT: semgrep-results.json not found — check the install/scan step logs above"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          exit 0
+
+      - name: Upload results artifact
+        if: always()
+        # Non-gating. An artifact-service failure must not fail the scan job;
+        # findings are already in the step summary.
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semgrep-results
+          path: semgrep-results.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  zizmor:
+    name: zizmor
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        id: install
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          python3 -m pip install --quiet --break-system-packages "zizmor==1.30.0" \
+            || python3 -m pip install --quiet "zizmor==1.30.0"
+
+      # No job-level `if: hashFiles(...)` guard here: that would evaluate
+      # before checkout, always see an empty workspace, and silently disable
+      # this job forever. Relying instead on zizmor's own no-op behavior when
+      # .github/workflows/ is missing or empty, covered by this step's own
+      # continue-on-error.
+      - name: Run zizmor scan
+        id: scan
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          zizmor --no-online-audits --format json .github/workflows > zizmor-results.json
+          zizmor --no-online-audits .github/workflows > zizmor-results.txt || true
+
+      - name: Record scan outcome
+        if: always()
+        run: |
+          if ! jq -e 'type == "array"' zizmor-results.json >/dev/null 2>&1; then
+            echo "::warning::zizmor did not produce valid scan output; inspect install/scan logs."
+          fi
+          {
+            echo "### zizmor"
+            if [ -f zizmor-results.json ]; then
+              count="$(jq 'length' zizmor-results.json 2>/dev/null || true)"
+              if [ -n "${count:-}" ]; then
+                echo "- SCANNED: ${count} finding(s) (see artifact \`zizmor-results\` for detail)"
+              else
+                echo "- SCANNED: output file present but could not be parsed as JSON"
+              fi
+            else
+              echo "- INSTALL-FAILED or NO-OUTPUT: zizmor-results.json not found — check the install/scan step logs above"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          exit 0
+
+      - name: Upload results artifact
+        if: always()
+        # Non-gating. Findings are already in the step summary above.
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zizmor-results
+          path: |
+            zizmor-results.json
+            zizmor-results.txt
+          if-no-files-found: ignore
+          retention-days: 30

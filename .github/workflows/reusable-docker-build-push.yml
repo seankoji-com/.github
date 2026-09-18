@@ -1,0 +1,76 @@
+name: Reusable GHCR Docker Build & Push
+
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: 'Full image name (e.g. ghcr.io/seankoji-com/my-service)'
+        required: true
+        type: string
+      dockerfile:
+        description: 'Path to Dockerfile'
+        type: string
+        default: 'Dockerfile'
+      context:
+        description: 'Build context path'
+        type: string
+        default: '.'
+      push:
+        description: 'Whether to push the image to registry'
+        type: boolean
+        default: true
+      extra-tags:
+        description: 'Additional tags (comma separated)'
+        type: string
+        default: ''
+      runner-json:
+        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Docker Build & Push
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        if: inputs.push
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ inputs.image-name }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha,prefix=sha-
+            ${{ inputs.extra-tags }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: ${{ inputs.context }}
+          file: ${{ inputs.dockerfile }}
+          push: ${{ inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

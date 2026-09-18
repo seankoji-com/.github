@@ -1,0 +1,112 @@
+name: Reusable Node.js CI Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: 'Node version fallback if .nvmrc is not present'
+        type: string
+        default: '22'
+      package-manager:
+        description: 'Package manager to use (pnpm, npm, yarn)'
+        type: string
+        default: 'pnpm'
+      run-lint:
+        description: 'Whether to run linting step'
+        type: boolean
+        default: true
+      run-typecheck:
+        description: 'Whether to run typecheck step'
+        type: boolean
+        default: true
+      run-prettier:
+        description: 'Whether to run prettier check'
+        type: boolean
+        default: true
+      run-test:
+        description: 'Whether to run tests'
+        type: boolean
+        default: true
+      run-build:
+        description: 'Whether to run build step'
+        type: boolean
+        default: true
+      runner-json:
+        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        type: string
+        default: '["ubuntu-latest"]'
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate & Test
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Setup pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+
+      - name: Check for .nvmrc
+        id: check-nvmrc
+        run: |
+          if [ -f ".nvmrc" ]; then
+            echo "has_nvmrc=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_nvmrc=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node.js (from .nvmrc)
+        if: steps.check-nvmrc.outputs.has_nvmrc == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: ${{ inputs.package-manager }}
+
+      - name: Setup Node.js (from input fallback)
+        if: steps.check-nvmrc.outputs.has_nvmrc != 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+
+      - name: Install dependencies (pnpm)
+        if: inputs.package-manager == 'pnpm'
+        run: pnpm install --frozen-lockfile
+
+      - name: Install dependencies (npm)
+        if: inputs.package-manager == 'npm'
+        run: npm ci
+
+      - name: Install dependencies (yarn)
+        if: inputs.package-manager == 'yarn'
+        run: yarn install --frozen-lockfile
+
+      - name: Lint
+        if: inputs.run-lint
+        run: ${{ inputs.package-manager }} run lint
+
+      - name: Type check
+        if: inputs.run-typecheck
+        run: ${{ inputs.package-manager }} run typecheck
+
+      - name: Prettier check
+        if: inputs.run-prettier
+        run: |
+          if ${{ inputs.package-manager }} run | grep -q 'prettier:check'; then
+            ${{ inputs.package-manager }} run prettier:check
+          else
+            echo "No prettier:check script found, skipping."
+          fi
+
+      - name: Test
+        if: inputs.run-test
+        run: ${{ inputs.package-manager }} test
+
+      - name: Build
+        if: inputs.run-build
+        run: ${{ inputs.package-manager }} run build

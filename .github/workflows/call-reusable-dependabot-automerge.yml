@@ -1,0 +1,20 @@
+# Local activation of the shared Dependabot auto-merge workflow.
+name: Dependabot Auto-Merge
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    uses: seankoji-com/.github/.github/workflows/reusable-dependabot-automerge.yml@main
+    with:
+      runner-json: '["ubuntu-latest"]'
+    secrets: inherit
