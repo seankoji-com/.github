@@ -537,6 +537,20 @@ class TestReviewEventResolution(unittest.TestCase):
             self.assertTrue(all(c.args[2]["status"] == "in_progress" for c in post.call_args_list))
             self.assertTrue(any("/pulls/8/reviews" in c.args[0] for c in get.call_args_list))
 
+    def test_partial_publication_attempts_all_refs_and_reports_failure(self):
+        for failed_ref in ("head", "merge"):
+            def fail_one(path, token, body):
+                if body["head_sha"] == failed_ref:
+                    raise urllib.error.URLError("temporary failure")
+            with self.subTest(failed_ref=failed_ref), \
+                 patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+                 patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+                 patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [TestPersonaReview().review("CHANGES_REQUESTED")]]), \
+                 patch.object(pr_gatekeeper, "_post", side_effect=fail_one) as post:
+                self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token"), 2)
+                self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"head", "merge"})
+                self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
     def test_review_read_failure_replaces_both_previous_green_gates(self):
         with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
              patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], ValueError("unreadable")]), \

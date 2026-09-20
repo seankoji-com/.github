@@ -438,13 +438,14 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             "output": {"title": title, "summary": summary}}
     if status == "completed":
         body["conclusion"] = conclusion
-    try:
-        for ref in sorted(publish_refs):
+    result = 0
+    for ref in sorted(publish_refs):
+        try:
             _post(f"/repos/{repo}/check-runs", token, dict(body, head_sha=ref))
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        print(f"::error::could not post the gate check run: {exc}", file=sys.stderr)
-        return 2
-    return 0
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            print(f"::error::could not post the gate check run for {ref}: {exc}", file=sys.stderr)
+            result = 2
+    return result
 
 
 def main(argv: list[str]) -> int:
