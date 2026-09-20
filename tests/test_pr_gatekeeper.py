@@ -409,5 +409,56 @@ class TestPendingOverridesTerminal(unittest.TestCase):
             self.assertEqual(post.call_args.args[2]["conclusion"], "success")
 
 
+class TestPersonaReview(unittest.TestCase):
+    def review(self, state="APPROVED", sha="head", ident=1, **fields):
+        return dict({"id": ident, "state": state, "commit_id": sha,
+                     "submitted_at": "2026-09-19T00:00:00Z",
+                     "user": {"id": pr_gatekeeper.PERSONA_USER_ID, "type": "Bot"}}, **fields)
+
+    def test_only_current_bot_approval_passes(self):
+        verdict = pr_gatekeeper.persona_verdict
+        self.assertEqual(verdict([self.review()], "head"), ("completed", "success"))
+        for reviews in ([], [self.review(sha="old")],
+                        [self.review(user={"id": 1, "type": "Bot"})],
+                        [self.review(user={"id": pr_gatekeeper.PERSONA_USER_ID, "type": "User"})],
+                        [self.review(submitted_at=None)], [self.review(state="PENDING")]):
+            with self.subTest(reviews=reviews):
+                self.assertEqual(verdict(reviews, "head"), ("in_progress", None))
+
+    def test_latest_verdict_and_dismissal(self):
+        reviews = [self.review(), self.review("CHANGES_REQUESTED", ident=2)]
+        self.assertEqual(pr_gatekeeper.persona_verdict(reviews, "head"), ("completed", "failure"))
+        reviews[-1]["state"] = "DISMISSED"
+        self.assertEqual(pr_gatekeeper.persona_verdict(reviews, "head"), ("in_progress", None))
+        reviews[-1]["state"] = "APPROVED"
+        self.assertEqual(pr_gatekeeper.persona_verdict(reviews, "head"), ("completed", "success"))
+
+    def test_every_pr_sharing_sha_requires_its_own_review(self):
+        prs = [{"number": n, "head": {"sha": "head"}} for n in (1, 2)]
+        with patch.object(pr_gatekeeper, "_get", side_effect=[prs, [self.review()], []]):
+            checks = pr_gatekeeper.collect_persona_checks("org/repo", "head", "token")
+        self.assertEqual([c["status"] for c in checks], ["completed", "in_progress"])
+
+    def test_review_pagination(self):
+        reviews = [self.review(sha="old", ident=n) for n in range(100)]
+        prs = [{"number": 1, "head": {"sha": "head"}}]
+        with patch.object(pr_gatekeeper, "_get", side_effect=[prs, reviews, [self.review()]]):
+            self.assertEqual(pr_gatekeeper.collect_persona_checks("org/repo", "head", "token")[0]["conclusion"], "success")
+
+    def test_enforcement_holds_gate_and_read_failure_blocks(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[{"number": 1, "head": {"sha": "head"}}], []]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "head", "token")
+            self.assertEqual(post.call_args.args[2]["status"], "in_progress")
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=ValueError("invalid reviews")), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "head", "token")
+            self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

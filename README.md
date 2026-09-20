@@ -48,6 +48,14 @@ jobs:
     uses: seankoji-com/.github/.github/workflows/released.yml@main
 ```
 
+## Required persona review
+
+When the Actions variable `PERSONA_REVIEW_REQUIRED` is `true`, the gate also
+requires an approval from Grumpy Engineer on the current PR head. Missing,
+stale, dismissed, and unreadable reviews block merging. Requested changes
+remain blocking. Review execution is managed by the private control plane;
+this public workflow reads only reviews in its calling repository.
+
 ## Security boundary
 
 This repository is intentionally public. It must not contain credentials,
