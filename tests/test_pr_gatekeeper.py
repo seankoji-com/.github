@@ -409,6 +409,25 @@ class TestPendingOverridesTerminal(unittest.TestCase):
             self.assertEqual(post.call_args.args[2]["conclusion"], "success")
 
 
+class TestReviewEventContract(unittest.TestCase):
+    def test_review_events_use_a_read_only_signal_and_trusted_followup(self):
+        import yaml
+        root = Path(__file__).resolve().parents[1]
+        caller = yaml.safe_load((root / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
+        events = caller.get("on", caller.get(True))
+        self.assertEqual(set(events["pull_request_review"]["types"]), {"submitted", "edited", "dismissed"})
+        signal = caller["jobs"]["review-event"]
+        self.assertEqual(signal["permissions"], {"contents": "read"})
+        self.assertEqual(signal["if"], "github.event_name == 'pull_request_review'")
+        gate = caller["jobs"]["gatekeeper"]
+        self.assertIn("github.event_name == 'workflow_run'", gate["if"])
+        self.assertIn("github.event.workflow_run.event == 'pull_request_review'", gate["if"])
+        self.assertIn("github.event.workflow_run.pull_requests[0].head.sha", gate["with"]["head_sha"])
+        helper = yaml.safe_load((root / ".github/workflows/reusable-review-event.yml").read_text())
+        self.assertEqual(helper["permissions"], {"contents": "read"})
+        self.assertTrue(all("uses" not in step for step in helper["jobs"]["signal"]["steps"]))
+
+
 class TestPersonaReview(unittest.TestCase):
     def review(self, state="APPROVED", sha="head", ident=1, **fields):
         return dict({"id": ident, "state": state, "commit_id": sha,

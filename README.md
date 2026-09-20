@@ -54,7 +54,9 @@ When the Actions variable `PERSONA_REVIEW_REQUIRED` is `true`, the gate also
 requires an approval from Grumpy Engineer on the current PR head. Missing,
 stale, dismissed, and unreadable reviews block merging. Requested changes
 remain blocking. Review execution is managed by the private control plane;
-this public workflow reads only reviews in its calling repository.
+this public workflow reads only reviews in its calling repository. Submitted,
+edited, and dismissed reviews trigger a read-only signal, followed by a gate
+evaluation from the default branch. The private reconciler recovers missed events.
 
 ## Security boundary
 
