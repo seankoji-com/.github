@@ -206,6 +206,11 @@ class TestDedupe(unittest.TestCase):
 
 
 class TestRecovery(unittest.TestCase):
+    def setUp(self):
+        prior = patch.object(pr_gatekeeper, "previous_publication_refs", return_value=set())
+        prior.start()
+        self.addCleanup(prior.stop)
+
     def test_http_error_records_failed_get_path(self):
         error = urllib.error.HTTPError("https://api.github.com/test", 403, "forbidden", {}, None)
         with patch.object(pr_gatekeeper.urllib.request, "urlopen", side_effect=error):
@@ -229,7 +234,7 @@ class TestRecovery(unittest.TestCase):
     def test_read_failure_posts_visible_failure_on_pr(self):
         for error in (ValueError("malformed response"), urllib.error.URLError("timeout")):
             with patch.object(pr_gatekeeper, "collect", side_effect=error), patch.object(pr_gatekeeper, "_post") as post:
-                self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake"), 0)
+                self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake"), 2)
                 body = post.call_args.args[2]
                 self.assertEqual(body["head_sha"], "abc")
                 self.assertEqual(body["conclusion"], "failure")
@@ -482,6 +487,7 @@ class TestPersonaReview(unittest.TestCase):
 
 
 class TestReviewEventResolution(unittest.TestCase):
+
     def pr(self):
         return {"number": 7, "head": {"sha": "head", "ref": "fix", "repo": {"id": 42}},
                 "merge_commit_sha": "merge"}
@@ -507,8 +513,9 @@ class TestReviewEventResolution(unittest.TestCase):
     def test_unassociated_signal_posts_blocking_fallback(self):
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
              patch.object(pr_gatekeeper, "resolve_review_heads", side_effect=ValueError("unassociated")), \
+             patch.object(pr_gatekeeper, "previous_publication_refs", return_value=set()), \
              patch.object(pr_gatekeeper, "_post") as post:
-            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "merge", "--review-run", "123"]), 0)
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "merge", "--review-run", "123"]), 2)
             self.assertEqual(post.call_args.args[2]["head_sha"], "merge")
             self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
 
@@ -537,6 +544,24 @@ class TestReviewEventResolution(unittest.TestCase):
             self.assertTrue(all(c.args[2]["status"] == "in_progress" for c in post.call_args_list))
             self.assertTrue(any("/pulls/8/reviews" in c.args[0] for c in get.call_args_list))
 
+    def test_pr_metadata_failure_recovers_previous_head_and_merge_destinations(self):
+        head, merge = "a" * 40, "b" * 40
+        previous = {"id": 9, "name": GATE_CHECK_NAME, "app": {"id": 15368},
+                    "output": {"summary": '<!-- gatekeeper-refs:["' + head + '", "' + merge + '"] -->'}}
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[ValueError("PR list unavailable"), {"check_runs": [previous]}]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", head, "token"), 2)
+            self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {head, merge})
+            self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_overlapping_publications_share_one_repository_queue(self):
+        import yaml
+        root = Path(__file__).resolve().parent.parent
+        caller = yaml.safe_load((root / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
+        self.assertEqual(caller["concurrency"], {"group": "pr-gatekeeper-${{ github.repository }}",
+                                               "cancel-in-progress": False, "queue": "max"})
+
     def test_partial_publication_attempts_all_refs_and_reports_failure(self):
         for failed_ref in ("head", "merge"):
             def fail_one(path, token, body):
@@ -553,7 +578,7 @@ class TestReviewEventResolution(unittest.TestCase):
 
     def test_review_read_failure_replaces_both_previous_green_gates(self):
         with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
-             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], ValueError("unreadable")]), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], ValueError("unreadable"), {"check_runs": []}]), \
              patch.object(pr_gatekeeper, "_post") as post:
             pr_gatekeeper.report("org/repo", "head", "token")
             self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"head", "merge"})

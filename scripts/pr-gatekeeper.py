@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -391,8 +392,25 @@ def resolve_review_heads(repo: str, run_id: int, token: str) -> list[str]:
     return sorted(heads)
 
 
+def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
+    """Recover destinations from our last gate if PR metadata is unavailable."""
+    payload = _get(f"/repos/{repo}/commits/{sha}/check-runs?filter=latest&per_page=100", token)
+    gates = [c for c in _batch(payload, "check_runs")
+             if c.get("name") == GATE_CHECK_NAME and (c.get("app") or {}).get("id") == 15368]
+    latest = max(gates, key=lambda c: c["id"], default={})
+    summary = (latest.get("output") or {}).get("summary", "")
+    match = re.search(r"<!-- gatekeeper-refs:(\[.*?\]) -->", summary)
+    if not match:
+        return set()
+    refs = json.loads(match[1])
+    if not isinstance(refs, list) or not all(isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref) for ref in refs):
+        raise ValueError("invalid previous gate destinations")
+    return set(refs)
+
+
 def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None) -> int:
     publish_refs = {sha}
+    result = 0
     try:
         if error:
             raise ValueError(error)
@@ -425,12 +443,20 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             summary += "\n\nGrumpy Engineer review of the current PR head is required.\n"
             summary += "\n".join(c["marker"] for c in persona_checks)
     except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        # Recover independently of the failed PR-list/review-run request.
+        # Every published verdict records its destinations for this purpose.
+        result = 2
+        try:
+            publish_refs.update(previous_publication_refs(repo, sha, token))
+        except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError):
+            print("::error::could not recover all previous gate destinations; retry required", file=sys.stderr)
         # The job lives on main, so put read/shape failures on the PR too.
         status, conclusion = "completed", "failure"
         title = "Could not read check state"
         summary = f"Gate evaluation failed: {type(exc).__name__}. See the gatekeeper job log and retry."
         path = getattr(exc, "request_path", "unknown endpoint")
         print(f"::error::{title} at {path}: {exc}", file=sys.stderr)
+    summary += "\n\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
     print(f"{status} / {conclusion or '-'}: {title}")
     if dry_run:
         return 0
@@ -438,7 +464,6 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             "output": {"title": title, "summary": summary}}
     if status == "completed":
         body["conclusion"] = conclusion
-    result = 0
     for ref in sorted(publish_refs):
         try:
             _post(f"/repos/{repo}/check-runs", token, dict(body, head_sha=ref))

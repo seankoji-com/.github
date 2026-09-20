@@ -36,21 +36,11 @@ permissions:
   pull-requests: read
   contents: read
 
-# Keyed on the head SHA, never `github.sha`: on a workflow_run run `github.sha`
-# is the DEFAULT BRANCH sha, which would pool every open PR in the repo into a
-# single group.
-#
-# `cancel-in-progress: false` alone is NOT enough. It protects only the RUNNING
-# run; the default `queue: single` still cancels the existing *pending* run the
-# moment a newer trigger enters the group. Every workflow completion fires a
-# trigger and the reconciler's recovery dispatch joins the same group, so on a
-# backlogged self-hosted fleet each recovery evaluation was cancelled before it
-# ever reached a runner — leaving the gate frozen at a mid-flight `in_progress`
-# with no later run left to post the terminal state. `queue: max` lets up to 100
-# pending runs wait in FIFO order instead, so the run triggered by the final
-# check-completion does eventually execute and post.
+# Head, merge, and review-event evaluations publish to overlapping commits.
+# Serialize repository-wide so an older approval cannot overtake a dismissal.
+# queue:max preserves completion events when several PRs finish together.
 concurrency:
-  group: pr-gatekeeper-${{ github.event.workflow_run.pull_requests[0].head.sha || github.event.workflow_run.head_sha || github.event.pull_request.head.sha || inputs.head_sha }}
+  group: pr-gatekeeper-${{ github.repository }}
   cancel-in-progress: false
   queue: max
 
