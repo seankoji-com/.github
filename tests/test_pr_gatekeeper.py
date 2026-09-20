@@ -525,6 +525,14 @@ class TestReviewEventResolution(unittest.TestCase):
                 self.assertTrue(all(b.get("conclusion") == expected for b in bodies))
                 self.assertTrue(all(b["status"] == ("completed" if expected else "in_progress") for b in bodies))
 
+    def test_review_read_failure_replaces_both_previous_green_gates(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], ValueError("unreadable")]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "head", "token")
+            self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"head", "merge"})
+            self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
     def test_mirrored_gate_preserves_red_merge_commit_checks(self):
         def collect(repo, sha, token):
             return ([run("merge test", conclusion="failure")] if sha == "merge" else [], EMPTY_STATUSES, [])

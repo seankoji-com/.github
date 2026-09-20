@@ -344,7 +344,7 @@ def _list_all(path: str, token: str) -> list[dict]:
         page += 1
 
 
-def collect_persona_checks(repo: str, sha: str, token: str) -> list[dict]:
+def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | None = None) -> list[dict]:
     """Central Actions runs are invisible on target commits; read actual reviews.
 
     No draft, fork, author or skip-review exemption. Every open PR sharing the
@@ -352,7 +352,9 @@ def collect_persona_checks(repo: str, sha: str, token: str) -> list[dict]:
     API errors propagate to report(), which posts a blocking diagnostic.
     """
     checks = []
-    for pr in _list_all(f"/repos/{repo}/pulls?state=open", token):
+    if prs is None:
+        prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
+    for pr in prs:
         if sha not in (pr["head"]["sha"], pr.get("merge_commit_sha")):
             continue
         reviews = _list_all(f"/repos/{repo}/pulls/{pr['number']}/reviews", token)
@@ -389,17 +391,23 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
     try:
         if error:
             raise ValueError(error)
-        runs, statuses, suites = collect(repo, sha, token)
         persona_checks = []
         # Ship disabled, validate the fleet, then enable the org Actions variable.
         # An absent review must hold the existing required gate pending.
         if os.environ.get("PERSONA_REVIEW_REQUIRED") == "true":
-            persona_checks = collect_persona_checks(repo, sha, token)
-            runs = runs + persona_checks
+            prs = [pr for pr in _list_all(f"/repos/{repo}/pulls?state=open", token)
+                   if sha in (pr["head"]["sha"], pr.get("merge_commit_sha"))]
+            # Resolve both destinations before reading reviews, so an API
+            # failure also replaces any earlier green merge gate.
+            publish_refs.update(ref for pr in prs
+                                for ref in (pr["head"]["sha"], pr.get("merge_commit_sha")) if ref)
+            persona_checks = collect_persona_checks(repo, sha, token, prs)
             # GitHub may prefer checks on its synthetic merge commit. Keep
             # both refs current so a dismissed review cannot leave one green.
             publish_refs.update(c[key] for c in persona_checks
                                 for key in ("head_sha", "merge_sha") if c.get(key))
+        runs, statuses, suites = collect(repo, sha, token)
+        runs = runs + persona_checks
         extra_summaries = []
         for ref in sorted(publish_refs - {sha}):
             other_status, other_conclusion, _, other_summary = evaluate(*collect(repo, ref, token))
