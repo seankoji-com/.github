@@ -60,7 +60,7 @@ jobs:
     if: github.event_name == 'pull_request_review'
     permissions:
       contents: read
-    uses: seankoji-com/.github/.github/workflows/reusable-review-event.yml@main
+    uses: ./.github/workflows/reusable-review-event.yml
 
   gatekeeper:
     # Guarding at the job level, not inside a step: an in-job early exit still
@@ -79,4 +79,5 @@ jobs:
     uses: seankoji-com/.github/.github/workflows/reusable-pr-gatekeeper.yml@main
     with:
       head_sha: ${{ github.event.workflow_run.pull_requests[0].head.sha || github.event.workflow_run.head_sha || github.event.pull_request.head.sha || inputs.head_sha }}
+      review_run_id: ${{ github.event.workflow_run.event == 'pull_request_review' && format('{0}', github.event.workflow_run.id) || '' }}
       runner-json: '["ubuntu-latest"]'

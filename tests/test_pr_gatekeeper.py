@@ -479,5 +479,62 @@ class TestPersonaReview(unittest.TestCase):
             self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
 
 
+
+class TestReviewEventResolution(unittest.TestCase):
+    def pr(self):
+        return {"number": 7, "head": {"sha": "head", "ref": "fix", "repo": {"id": 42}},
+                "merge_commit_sha": "merge"}
+
+    def test_empty_fork_links_resolve_merge_sha_to_head(self):
+        event = {"event": "pull_request_review", "head_sha": "merge", "pull_requests": []}
+        with patch.object(pr_gatekeeper, "_get", side_effect=[event, [self.pr()]]):
+            self.assertEqual(pr_gatekeeper.resolve_review_heads("org/repo", 123, "token"), ["head"])
+
+    def test_delayed_review_resolves_current_head_by_fork_branch(self):
+        event = {"event": "pull_request_review", "head_sha": "old-merge", "pull_requests": [],
+                 "head_repository": {"id": 42}, "head_branch": "fix"}
+        with patch.object(pr_gatekeeper, "_get", side_effect=[event, [self.pr()]]):
+            self.assertEqual(pr_gatekeeper.resolve_review_heads("org/repo", 123, "token"), ["head"])
+
+    def test_missing_metadata_does_not_match_null_merge_sha(self):
+        event = {"event": "pull_request_review", "head_repository": None}
+        pr = self.pr(); pr["merge_commit_sha"] = None
+        with patch.object(pr_gatekeeper, "_get", side_effect=[event, [pr]]):
+            with self.assertRaisesRegex(ValueError, "associate"):
+                pr_gatekeeper.resolve_review_heads("org/repo", 123, "token")
+
+    def test_unassociated_signal_posts_blocking_fallback(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
+             patch.object(pr_gatekeeper, "resolve_review_heads", side_effect=ValueError("unassociated")), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "merge", "--review-run", "123"]), 0)
+            self.assertEqual(post.call_args.args[2]["head_sha"], "merge")
+            self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+
+    def test_approval_and_dismissal_update_both_refs_using_actual_head(self):
+        for state, expected in (("APPROVED", "success"), ("DISMISSED", None)):
+            review = TestPersonaReview().review(state=state)
+            with self.subTest(state=state), \
+                 patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+                 patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+                 patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [review]]), \
+                 patch.object(pr_gatekeeper, "_post") as post:
+                pr_gatekeeper.report("org/repo", "merge", "token")
+                bodies = [call.args[2] for call in post.call_args_list]
+                self.assertEqual({b["head_sha"] for b in bodies}, {"head", "merge"})
+                self.assertTrue(all(b.get("conclusion") == expected for b in bodies))
+                self.assertTrue(all(b["status"] == ("completed" if expected else "in_progress") for b in bodies))
+
+    def test_mirrored_gate_preserves_red_merge_commit_checks(self):
+        def collect(repo, sha, token):
+            return ([run("merge test", conclusion="failure")] if sha == "merge" else [], EMPTY_STATUSES, [])
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", side_effect=collect), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [TestPersonaReview().review()]]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "head", "token")
+            self.assertEqual(len(post.call_args_list), 2)
+            self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

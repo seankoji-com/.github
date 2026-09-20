@@ -353,18 +353,42 @@ def collect_persona_checks(repo: str, sha: str, token: str) -> list[dict]:
     """
     checks = []
     for pr in _list_all(f"/repos/{repo}/pulls?state=open", token):
-        if pr["head"]["sha"] != sha:
+        if sha not in (pr["head"]["sha"], pr.get("merge_commit_sha")):
             continue
         reviews = _list_all(f"/repos/{repo}/pulls/{pr['number']}/reviews", token)
-        status, conclusion = persona_verdict(reviews, sha)
+        status, conclusion = persona_verdict(reviews, pr["head"]["sha"])
         checks.append({"name": f"{PERSONA_CHECK_NAME} (PR #{pr['number']})",
                        "status": status, "conclusion": conclusion,
-                       "marker": persona_marker(pr['number'], (status, conclusion))})
+                       "marker": persona_marker(pr['number'], (status, conclusion)),
+                       "head_sha": pr["head"]["sha"], "merge_sha": pr.get("merge_commit_sha")})
     return checks
 
 
-def report(repo: str, sha: str, token: str, dry_run: bool = False) -> int:
+def resolve_review_heads(repo: str, run_id: int, token: str) -> list[str]:
+    """Resolve fork review signals using trusted GitHub run and PR metadata."""
+    run = _get(f"/repos/{repo}/actions/runs/{run_id}", token)
+    if run.get("event") != "pull_request_review":
+        raise ValueError("not a review event workflow run")
+    linked = {p["number"] for p in run.get("pull_requests", [])}
+    heads = set()
+    for pr in _list_all(f"/repos/{repo}/pulls?state=open", token):
+        head = pr["head"]
+        same_branch = ((run.get("head_repository") or {}).get("id") is not None
+                       and (head.get("repo") or {}).get("id") == run["head_repository"]["id"]
+                       and head.get("ref") == run.get("head_branch"))
+        same_commit = bool(run.get("head_sha")) and run["head_sha"] in (head["sha"], pr.get("merge_commit_sha"))
+        if pr["number"] in linked or same_branch or same_commit:
+            heads.add(head["sha"])
+    if not heads:
+        raise ValueError("could not associate review event with an open PR")
+    return sorted(heads)
+
+
+def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None) -> int:
+    publish_refs = {sha}
     try:
+        if error:
+            raise ValueError(error)
         runs, statuses, suites = collect(repo, sha, token)
         persona_checks = []
         # Ship disabled, validate the fleet, then enable the org Actions variable.
@@ -372,7 +396,19 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False) -> int:
         if os.environ.get("PERSONA_REVIEW_REQUIRED") == "true":
             persona_checks = collect_persona_checks(repo, sha, token)
             runs = runs + persona_checks
+            # GitHub may prefer checks on its synthetic merge commit. Keep
+            # both refs current so a dismissed review cannot leave one green.
+            publish_refs.update(c[key] for c in persona_checks
+                                for key in ("head_sha", "merge_sha") if c.get(key))
+        extra_summaries = []
+        for ref in sorted(publish_refs - {sha}):
+            other_status, other_conclusion, _, other_summary = evaluate(*collect(repo, ref, token))
+            runs = runs + [{"name": f"Checks on {ref}", "status": other_status,
+                            "conclusion": other_conclusion}]
+            extra_summaries.append(other_summary)
         status, conclusion, title, summary = evaluate(runs, statuses, suites)
+        if extra_summaries:
+            summary += "\n\n" + "\n\n".join(extra_summaries)
         if persona_checks:
             summary += "\n\nGrumpy Engineer review of the current PR head is required.\n"
             summary += "\n".join(c["marker"] for c in persona_checks)
@@ -391,7 +427,8 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False) -> int:
     if status == "completed":
         body["conclusion"] = conclusion
     try:
-        _post(f"/repos/{repo}/check-runs", token, body)
+        for ref in sorted(publish_refs):
+            _post(f"/repos/{repo}/check-runs", token, dict(body, head_sha=ref))
     except (urllib.error.URLError, OSError, ValueError) as exc:
         print(f"::error::could not post the gate check run: {exc}", file=sys.stderr)
         return 2
@@ -404,12 +441,21 @@ def main(argv: list[str]) -> int:
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--sha", help="head commit SHA")
     target.add_argument("--reconcile-open", action="store_true", help="refresh every open PR in this repository")
+    parser.add_argument("--review-run", type=int, help="resolve the current PR head from a review signal run")
     parser.add_argument("--dry-run", action="store_true", help="evaluate without posting")
     args = parser.parse_args(argv)
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         print("::error::GITHUB_TOKEN is not set", file=sys.stderr)
         return 2
+    if args.review_run:
+        if not args.sha:
+            parser.error("--review-run requires --sha as its blocking fallback")
+        try:
+            heads = resolve_review_heads(args.repo, args.review_run, token)
+        except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            return report(args.repo, args.sha, token, args.dry_run, error=str(exc))
+        return max(report(args.repo, head, token, args.dry_run) for head in heads)
     if not args.reconcile_open:
         return report(args.repo, args.sha, token, args.dry_run)
     page, result = 1, 0

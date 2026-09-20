@@ -18,6 +18,10 @@ on:
         description: 'Commit SHA to evaluate and report the gate against.'
         required: true
         type: string
+      review_run_id:
+        description: 'Review signal run to resolve through trusted GitHub metadata.'
+        type: string
+        default: ''
       runner-json:
         description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
         type: string
@@ -57,8 +61,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PERSONA_REVIEW_REQUIRED: ${{ vars.PERSONA_REVIEW_REQUIRED }}
+          REVIEW_RUN_ID: ${{ inputs.review_run_id }}
           HEAD_SHA: ${{ inputs.head_sha }}
         run: |
+          args=()
+          if [ -n "$REVIEW_RUN_ID" ]; then args+=(--review-run "$REVIEW_RUN_ID"); fi
           python3 "${RUNNER_TEMP}/pr-gatekeeper.py" \
             --repo "${GITHUB_REPOSITORY}" \
-            --sha "${HEAD_SHA}"
+            --sha "${HEAD_SHA}" "${args[@]}"
