@@ -547,9 +547,29 @@ class TestReviewEventResolution(unittest.TestCase):
     def test_pr_metadata_failure_recovers_previous_head_and_merge_destinations(self):
         head, merge = "a" * 40, "b" * 40
         previous = {"id": 9, "name": GATE_CHECK_NAME, "app": {"id": 15368},
-                    "output": {"summary": '<!-- gatekeeper-refs:["' + head + '", "' + merge + '"] -->'}}
+                    "output": {"summary": '<!-- gatekeeper-refs:["' + head + '", "' + merge + '"] --> <!-- gatekeeper-refs-complete -->'}}
         with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
              patch.object(pr_gatekeeper, "_get", side_effect=[ValueError("PR list unavailable"), {"check_runs": [previous]}]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", head, "token"), 2)
+            self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {head, merge})
+            self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_failed_recovery_retains_older_complete_metadata_across_pages(self):
+        head, merge = "a" * 40, "b" * 40
+        old = {"id": 1, "name": GATE_CHECK_NAME, "app": {"id": 15368},
+               "output": {"summary": '<!-- gatekeeper-refs:["' + head + '", "' + merge + '"] --> <!-- gatekeeper-refs-complete -->'}}
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=ValueError("API outage")), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", head, "token"), 2)
+            incomplete = post.call_args.args[2]
+        self.assertNotIn("<!-- gatekeeper-refs-complete -->", incomplete["output"]["summary"])
+        incomplete.update(id=2, app={"id": 15368})
+        page_one = [incomplete] + [{"id": n, "name": "other"} for n in range(99)]
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[ValueError("PR metadata unavailable"),
+                          {"check_runs": page_one}, {"check_runs": [old]}]), \
              patch.object(pr_gatekeeper, "_post") as post:
             self.assertEqual(pr_gatekeeper.report("org/repo", head, "token"), 2)
             self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {head, merge})

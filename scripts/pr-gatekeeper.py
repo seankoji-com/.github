@@ -394,22 +394,31 @@ def resolve_review_heads(repo: str, run_id: int, token: str) -> list[str]:
 
 def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
     """Recover destinations from our last gate if PR metadata is unavailable."""
-    payload = _get(f"/repos/{repo}/commits/{sha}/check-runs?filter=latest&per_page=100", token)
-    gates = [c for c in _batch(payload, "check_runs")
-             if c.get("name") == GATE_CHECK_NAME and (c.get("app") or {}).get("id") == 15368]
-    latest = max(gates, key=lambda c: c["id"], default={})
-    summary = (latest.get("output") or {}).get("summary", "")
-    match = re.search(r"<!-- gatekeeper-refs:(\[.*?\]) -->", summary)
-    if not match:
-        return set()
-    refs = json.loads(match[1])
-    if not isinstance(refs, list) or not all(isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref) for ref in refs):
-        raise ValueError("invalid previous gate destinations")
-    return set(refs)
+    refs, page = set(), 1
+    while True:
+        payload = _get(f"/repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100&page={page}", token)
+        batch = _batch(payload, "check_runs")
+        for check in batch:
+            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != 15368:
+                continue
+            summary = (check.get("output") or {}).get("summary", "")
+            if "<!-- gatekeeper-refs-complete -->" not in summary:
+                continue
+            match = re.search(r"<!-- gatekeeper-refs:(\[.*?\]) -->", summary)
+            if not match:
+                continue
+            previous = json.loads(match[1])
+            if not isinstance(previous, list) or not all(isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref) for ref in previous):
+                raise ValueError("invalid previous gate destinations")
+            refs.update(previous)
+        if len(batch) < 100:
+            return refs
+        page += 1
 
 
 def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None) -> int:
     publish_refs = {sha}
+    refs_complete = False
     result = 0
     try:
         if error:
@@ -423,11 +432,13 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             # failure also replaces any earlier green merge gate.
             publish_refs.update(ref for pr in prs
                                 for ref in (pr["head"]["sha"], pr.get("merge_commit_sha")) if ref)
+            refs_complete = True
             persona_checks = collect_persona_checks(repo, sha, token, prs)
             # GitHub may prefer checks on its synthetic merge commit. Keep
             # both refs current so a dismissed review cannot leave one green.
             publish_refs.update(c[key] for c in persona_checks
                                 for key in ("head_sha", "merge_sha") if c.get(key))
+        refs_complete = True
         runs, statuses, suites = collect(repo, sha, token)
         runs = runs + persona_checks
         extra_summaries = []
@@ -447,7 +458,9 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         # Every published verdict records its destinations for this purpose.
         result = 2
         try:
-            publish_refs.update(previous_publication_refs(repo, sha, token))
+            recovered = previous_publication_refs(repo, sha, token)
+            publish_refs.update(recovered)
+            refs_complete |= bool(recovered)
         except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError):
             print("::error::could not recover all previous gate destinations; retry required", file=sys.stderr)
         # The job lives on main, so put read/shape failures on the PR too.
@@ -457,6 +470,8 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         path = getattr(exc, "request_path", "unknown endpoint")
         print(f"::error::{title} at {path}: {exc}", file=sys.stderr)
     summary += "\n\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
+    if refs_complete:
+        summary += "\n<!-- gatekeeper-refs-complete -->"
     print(f"{status} / {conclusion or '-'}: {title}")
     if dry_run:
         return 0
