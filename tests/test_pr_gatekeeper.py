@@ -416,6 +416,7 @@ class TestReviewEventContract(unittest.TestCase):
         caller = yaml.safe_load((root / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
         events = caller.get("on", caller.get(True))
         self.assertEqual(set(events["pull_request_review"]["types"]), {"submitted", "edited", "dismissed"})
+        self.assertEqual(caller["permissions"]["actions"], "read")
         signal = caller["jobs"]["review-event"]
         self.assertEqual(signal["permissions"], {"contents": "read"})
         self.assertEqual(signal["if"], "github.event_name == 'pull_request_review'")

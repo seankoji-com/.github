@@ -30,6 +30,7 @@ on:
 # POST in every repo — invisibly, since a resolution failure produces no check
 # run to go red.
 permissions:
+  actions: read
   checks: write
   statuses: read
   pull-requests: read
