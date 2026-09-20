@@ -20,3 +20,8 @@ This repository is public and supplies organization-wide GitHub defaults.
 - Add tests for script changes.
 - Preserve project-specific local overrides when their guidance differs from
   the organization default.
+
+## Review gate verification
+
+Use [the review-event verification procedure](docs/review-gate-verification.md)
+when checking approval and dismissal event delivery.
