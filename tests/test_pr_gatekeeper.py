@@ -525,6 +525,17 @@ class TestReviewEventResolution(unittest.TestCase):
                 self.assertTrue(all(b.get("conclusion") == expected for b in bodies))
                 self.assertTrue(all(b["status"] == ("completed" if expected else "in_progress") for b in bodies))
 
+    def test_merge_event_requires_every_review_sharing_the_head(self):
+        sibling = dict(self.pr(), number=8, merge_commit_sha="other-merge")
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr(), sibling], [TestPersonaReview().review()], []]) as get, \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "merge", "token")
+            self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"head", "merge", "other-merge"})
+            self.assertTrue(all(c.args[2]["status"] == "in_progress" for c in post.call_args_list))
+            self.assertTrue(any("/pulls/8/reviews" in c.args[0] for c in get.call_args_list))
+
     def test_review_read_failure_replaces_both_previous_green_gates(self):
         with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
              patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], ValueError("unreadable")]), \

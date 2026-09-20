@@ -344,6 +344,13 @@ def _list_all(path: str, token: str) -> list[dict]:
         page += 1
 
 
+def matching_prs(prs: list[dict], sha: str) -> list[dict]:
+    """A shared head gate must enforce every PR that can use that gate."""
+    heads = {pr["head"]["sha"] for pr in prs
+             if sha in (pr["head"]["sha"], pr.get("merge_commit_sha"))}
+    return [pr for pr in prs if pr["head"]["sha"] in heads]
+
+
 def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | None = None) -> list[dict]:
     """Central Actions runs are invisible on target commits; read actual reviews.
 
@@ -354,9 +361,7 @@ def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | No
     checks = []
     if prs is None:
         prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
-    for pr in prs:
-        if sha not in (pr["head"]["sha"], pr.get("merge_commit_sha")):
-            continue
+    for pr in matching_prs(prs, sha):
         reviews = _list_all(f"/repos/{repo}/pulls/{pr['number']}/reviews", token)
         status, conclusion = persona_verdict(reviews, pr["head"]["sha"])
         checks.append({"name": f"{PERSONA_CHECK_NAME} (PR #{pr['number']})",
@@ -395,8 +400,7 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         # Ship disabled, validate the fleet, then enable the org Actions variable.
         # An absent review must hold the existing required gate pending.
         if os.environ.get("PERSONA_REVIEW_REQUIRED") == "true":
-            prs = [pr for pr in _list_all(f"/repos/{repo}/pulls?state=open", token)
-                   if sha in (pr["head"]["sha"], pr.get("merge_commit_sha"))]
+            prs = matching_prs(_list_all(f"/repos/{repo}/pulls?state=open", token), sha)
             # Resolve both destinations before reading reviews, so an API
             # failure also replaces any earlier green merge gate.
             publish_refs.update(ref for pr in prs
