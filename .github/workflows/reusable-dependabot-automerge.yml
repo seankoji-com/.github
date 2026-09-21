@@ -8,6 +8,15 @@ on:
         type: string
         default: '["ubuntu-latest"]'
 
+# Least privilege, matching the other reusable-* workflows. This reusable is
+# called from a `pull_request_target` context; a caller that omits its own
+# `permissions:` would otherwise inject the org-default token scope into the
+# job. The only credential this job actually uses is the GitHub App token from
+# the `app-token` step (for both metadata and `gh pr merge`), and the runner
+# GITHUB_TOKEN is never used for writes — so contents: read is sufficient.
+permissions:
+  contents: read
+
 jobs:
   auto-merge:
     runs-on: ${{ fromJSON(inputs.runner-json) }}
@@ -36,9 +45,30 @@ jobs:
       # bumps, so the workflow uses Dependabot's typed metadata instead.
       - name: Read Dependabot update metadata
         id: metadata
-        uses: dependabot/fetch-metadata@21025c705c08248db411dc16f3619e6b5f9ea21a # v2
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ steps.app-token.outputs.token }}
+
+      # Contract check. The merge step below is gated entirely on this action's
+      # `update-type` output. If a future major renames that output or changes
+      # its value format, `steps.metadata.outputs.update-type` resolves to an
+      # empty string, the `if:` is false, the merge step is skipped, and the job
+      # still exits 0 — a no-op that looks healthy. Assert the output is one of
+      # the values v3.1.0 can emit (src/dependabot/output.ts UPDATE_TYPES_PRIORITY)
+      # so a broken output fails loudly instead.
+      - name: Verify fetch-metadata update-type contract
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          case "$UPDATE_TYPE" in
+            version-update:semver-major|version-update:semver-minor|version-update:semver-patch)
+              echo "fetch-metadata update-type is a known v3 value: $UPDATE_TYPE"
+              ;;
+            *)
+              echo "::error::fetch-metadata returned an unrecognized update-type ('$UPDATE_TYPE'); refusing to treat the auto-merge gate as healthy."
+              exit 1
+              ;;
+          esac
 
       - name: Enable auto-merge for patch and minor updates
         if: >-
