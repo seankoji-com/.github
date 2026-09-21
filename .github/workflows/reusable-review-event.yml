@@ -1,0 +1,17 @@
+name: Review state changed
+
+# A fork review event cannot post checks. Finish a read-only signal so the
+# caller's workflow_run handler can evaluate using trusted default-branch code.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest # runner-keep-hosted
+    timeout-minutes: 2
+    steps:
+      - name: Signal review state change
+        run: echo "Review state changed; the default-branch gate will reevaluate."

@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -50,6 +51,8 @@ API = "https://api.github.com"
 # The check-run name, verbatim. The org ruleset matches this string exactly;
 # any variation here is an unsatisfiable required context on 33 repos.
 GATE_CHECK_NAME = "gatekeeper / all-checks-passed"
+PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
+PERSONA_CHECK_NAME = "persona / grumpy-engineer"
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
 # GitHub adds tomorrow pass silently; anything unrecognised must block.
@@ -310,17 +313,165 @@ def collect(repo: str, sha: str, token: str) -> tuple[list, dict, list]:
     return _collect_for_ref(repo, ref, token)
 
 
-def report(repo: str, sha: str, token: str, dry_run: bool = False) -> int:
+def persona_verdict(reviews: list[dict], sha: str) -> tuple[str, str | None]:
+    """Only a submitted verdict from Grumpy on this exact head can satisfy us."""
+    matching = [r for r in reviews
+                if (r.get("user") or {}).get("id") == PERSONA_USER_ID
+                and (r.get("user") or {}).get("type") == "Bot"
+                and r.get("commit_id") == sha and r.get("submitted_at")
+                and r.get("state") != "PENDING"]
+    latest = max(matching, key=lambda r: (r["submitted_at"], r["id"]), default={})
+    if latest.get("state") == "APPROVED":
+        return "completed", "success"
+    if latest.get("state") == "CHANGES_REQUESTED":
+        return "completed", "failure"
+    return "in_progress", None
+
+
+def persona_marker(number: int, verdict: tuple[str, str | None]) -> str:
+    return f"<!-- grumpy-review:{number}:{verdict[0]}:{verdict[1] or 'waiting'} -->"
+
+
+def _list_all(path: str, token: str) -> list[dict]:
+    items, page = [], 1
+    separator = "&" if "?" in path else "?"
+    while True:
+        batch = _get(f"{path}{separator}per_page=100&page={page}", token)
+        if not isinstance(batch, list) or not all(isinstance(i, dict) for i in batch):
+            raise ValueError("invalid paginated list response")
+        items.extend(batch)
+        if len(batch) < 100:
+            return items
+        page += 1
+
+
+def matching_prs(prs: list[dict], sha: str) -> list[dict]:
+    """A shared head gate must enforce every PR that can use that gate."""
+    heads = {pr["head"]["sha"] for pr in prs
+             if sha in (pr["head"]["sha"], pr.get("merge_commit_sha"))}
+    return [pr for pr in prs if pr["head"]["sha"] in heads]
+
+
+def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | None = None) -> list[dict]:
+    """Central Actions runs are invisible on target commits; read actual reviews.
+
+    No draft, fork, author or skip-review exemption. Every open PR sharing the
+    commit must have its own review. Non-PR workflow commits keep normal gating.
+    API errors propagate to report(), which posts a blocking diagnostic.
+    """
+    checks = []
+    if prs is None:
+        prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
+    for pr in matching_prs(prs, sha):
+        reviews = _list_all(f"/repos/{repo}/pulls/{pr['number']}/reviews", token)
+        status, conclusion = persona_verdict(reviews, pr["head"]["sha"])
+        checks.append({"name": f"{PERSONA_CHECK_NAME} (PR #{pr['number']})",
+                       "status": status, "conclusion": conclusion,
+                       "marker": persona_marker(pr['number'], (status, conclusion)),
+                       "head_sha": pr["head"]["sha"], "merge_sha": pr.get("merge_commit_sha")})
+    return checks
+
+
+def resolve_review_heads(repo: str, run_id: int, token: str) -> list[str]:
+    """Resolve fork review signals using trusted GitHub run and PR metadata."""
+    run = _get(f"/repos/{repo}/actions/runs/{run_id}", token)
+    if run.get("event") != "pull_request_review":
+        raise ValueError("not a review event workflow run")
+    linked = {p["number"] for p in run.get("pull_requests", [])}
+    heads = set()
+    for pr in _list_all(f"/repos/{repo}/pulls?state=open", token):
+        head = pr["head"]
+        same_branch = ((run.get("head_repository") or {}).get("id") is not None
+                       and (head.get("repo") or {}).get("id") == run["head_repository"]["id"]
+                       and head.get("ref") == run.get("head_branch"))
+        same_commit = bool(run.get("head_sha")) and run["head_sha"] in (head["sha"], pr.get("merge_commit_sha"))
+        if pr["number"] in linked or same_branch or same_commit:
+            heads.add(head["sha"])
+    if not heads:
+        raise ValueError("could not associate review event with an open PR")
+    return sorted(heads)
+
+
+def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
+    """Recover destinations from our last gate if PR metadata is unavailable."""
+    refs, page = set(), 1
+    while True:
+        payload = _get(f"/repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100&page={page}", token)
+        batch = _batch(payload, "check_runs")
+        for check in batch:
+            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != 15368:
+                continue
+            summary = (check.get("output") or {}).get("summary", "")
+            if "<!-- gatekeeper-refs-complete -->" not in summary:
+                continue
+            match = re.search(r"<!-- gatekeeper-refs:(\[.*?\]) -->", summary)
+            if not match:
+                continue
+            previous = json.loads(match[1])
+            if not isinstance(previous, list) or not all(isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref) for ref in previous):
+                raise ValueError("invalid previous gate destinations")
+            refs.update(previous)
+        if len(batch) < 100:
+            return refs
+        page += 1
+
+
+def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None) -> int:
+    publish_refs = {sha}
+    refs_complete = False
+    result = 0
     try:
+        if error:
+            raise ValueError(error)
+        persona_checks = []
+        # Ship disabled, validate the fleet, then enable the org Actions variable.
+        # An absent review must hold the existing required gate pending.
+        if os.environ.get("PERSONA_REVIEW_REQUIRED") == "true":
+            prs = matching_prs(_list_all(f"/repos/{repo}/pulls?state=open", token), sha)
+            # Resolve both destinations before reading reviews, so an API
+            # failure also replaces any earlier green merge gate.
+            publish_refs.update(ref for pr in prs
+                                for ref in (pr["head"]["sha"], pr.get("merge_commit_sha")) if ref)
+            refs_complete = True
+            persona_checks = collect_persona_checks(repo, sha, token, prs)
+            # GitHub may prefer checks on its synthetic merge commit. Keep
+            # both refs current so a dismissed review cannot leave one green.
+            publish_refs.update(c[key] for c in persona_checks
+                                for key in ("head_sha", "merge_sha") if c.get(key))
+        refs_complete = True
         runs, statuses, suites = collect(repo, sha, token)
+        runs = runs + persona_checks
+        extra_summaries = []
+        for ref in sorted(publish_refs - {sha}):
+            other_status, other_conclusion, _, other_summary = evaluate(*collect(repo, ref, token))
+            runs = runs + [{"name": f"Checks on {ref}", "status": other_status,
+                            "conclusion": other_conclusion}]
+            extra_summaries.append(other_summary)
         status, conclusion, title, summary = evaluate(runs, statuses, suites)
-    except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError) as exc:
+        if extra_summaries:
+            summary += "\n\n" + "\n\n".join(extra_summaries)
+        if persona_checks:
+            summary += "\n\nGrumpy Engineer review of the current PR head is required.\n"
+            summary += "\n".join(c["marker"] for c in persona_checks)
+    except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        # Recover independently of the failed PR-list/review-run request.
+        # Every published verdict records its destinations for this purpose.
+        result = 2
+        try:
+            recovered = previous_publication_refs(repo, sha, token)
+            publish_refs.update(recovered)
+            refs_complete |= bool(recovered)
+        except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError):
+            print("::error::could not recover all previous gate destinations; retry required", file=sys.stderr)
         # The job lives on main, so put read/shape failures on the PR too.
         status, conclusion = "completed", "failure"
         title = "Could not read check state"
         summary = f"Gate evaluation failed: {type(exc).__name__}. See the gatekeeper job log and retry."
         path = getattr(exc, "request_path", "unknown endpoint")
         print(f"::error::{title} at {path}: {exc}", file=sys.stderr)
+    summary += "\n\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
+    if refs_complete:
+        summary += "\n<!-- gatekeeper-refs-complete -->"
     print(f"{status} / {conclusion or '-'}: {title}")
     if dry_run:
         return 0
@@ -328,12 +479,13 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False) -> int:
             "output": {"title": title, "summary": summary}}
     if status == "completed":
         body["conclusion"] = conclusion
-    try:
-        _post(f"/repos/{repo}/check-runs", token, body)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        print(f"::error::could not post the gate check run: {exc}", file=sys.stderr)
-        return 2
-    return 0
+    for ref in sorted(publish_refs):
+        try:
+            _post(f"/repos/{repo}/check-runs", token, dict(body, head_sha=ref))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            print(f"::error::could not post the gate check run for {ref}: {exc}", file=sys.stderr)
+            result = 2
+    return result
 
 
 def main(argv: list[str]) -> int:
@@ -342,12 +494,21 @@ def main(argv: list[str]) -> int:
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--sha", help="head commit SHA")
     target.add_argument("--reconcile-open", action="store_true", help="refresh every open PR in this repository")
+    parser.add_argument("--review-run", type=int, help="resolve the current PR head from a review signal run")
     parser.add_argument("--dry-run", action="store_true", help="evaluate without posting")
     args = parser.parse_args(argv)
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         print("::error::GITHUB_TOKEN is not set", file=sys.stderr)
         return 2
+    if args.review_run:
+        if not args.sha:
+            parser.error("--review-run requires --sha as its blocking fallback")
+        try:
+            heads = resolve_review_heads(args.repo, args.review_run, token)
+        except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            return report(args.repo, args.sha, token, args.dry_run, error=str(exc))
+        return max(report(args.repo, head, token, args.dry_run) for head in heads)
     if not args.reconcile_open:
         return report(args.repo, args.sha, token, args.dry_run)
     page, result = 1, 0
