@@ -416,7 +416,7 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
         page += 1
 
 
-def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None) -> int:
+def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None, seed: bool = False) -> int:
     publish_refs = {sha}
     refs_complete = False
     result = 0
@@ -433,26 +433,32 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             publish_refs.update(ref for pr in prs
                                 for ref in (pr["head"]["sha"], pr.get("merge_commit_sha")) if ref)
             refs_complete = True
-            persona_checks = collect_persona_checks(repo, sha, token, prs)
-            # GitHub may prefer checks on its synthetic merge commit. Keep
-            # both refs current so a dismissed review cannot leave one green.
-            publish_refs.update(c[key] for c in persona_checks
-                                for key in ("head_sha", "merge_sha") if c.get(key))
+            if not seed:
+                persona_checks = collect_persona_checks(repo, sha, token, prs)
+                # GitHub may prefer checks on its synthetic merge commit. Keep
+                # both refs current so a dismissed review cannot leave one green.
+                publish_refs.update(c[key] for c in persona_checks
+                                    for key in ("head_sha", "merge_sha") if c.get(key))
         refs_complete = True
-        runs, statuses, suites = collect(repo, sha, token)
-        runs = runs + persona_checks
-        extra_summaries = []
-        for ref in sorted(publish_refs - {sha}):
-            other_status, other_conclusion, _, other_summary = evaluate(*collect(repo, ref, token))
-            runs = runs + [{"name": f"Checks on {ref}", "status": other_status,
-                            "conclusion": other_conclusion}]
-            extra_summaries.append(other_summary)
-        status, conclusion, title, summary = evaluate(runs, statuses, suites)
-        if extra_summaries:
-            summary += "\n\n" + "\n\n".join(extra_summaries)
-        if persona_checks:
-            summary += "\n\nGrumpy Engineer review of the current PR head is required.\n"
-            summary += "\n".join(c["marker"] for c in persona_checks)
+        if seed:
+            status, conclusion = "in_progress", None
+            title = "Gate seeded, awaiting CI"
+            summary = "Gate seeded on PR event. Awaiting workflow runs."
+        else:
+            runs, statuses, suites = collect(repo, sha, token)
+            runs = runs + persona_checks
+            extra_summaries = []
+            for ref in sorted(publish_refs - {sha}):
+                other_status, other_conclusion, _, other_summary = evaluate(*collect(repo, ref, token))
+                runs = runs + [{"name": f"Checks on {ref}", "status": other_status,
+                                "conclusion": other_conclusion}]
+                extra_summaries.append(other_summary)
+            status, conclusion, title, summary = evaluate(runs, statuses, suites)
+            if extra_summaries:
+                summary += "\n\n" + "\n\n".join(extra_summaries)
+            if persona_checks:
+                summary += "\n\nGrumpy Engineer review of the current PR head is required.\n"
+                summary += "\n".join(c["marker"] for c in persona_checks)
     except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
         # Recover independently of the failed PR-list/review-run request.
         # Every published verdict records its destinations for this purpose.
@@ -496,11 +502,18 @@ def main(argv: list[str]) -> int:
     target.add_argument("--reconcile-open", action="store_true", help="refresh every open PR in this repository")
     parser.add_argument("--review-run", type=int, help="resolve the current PR head from a review signal run")
     parser.add_argument("--dry-run", action="store_true", help="evaluate without posting")
+    parser.add_argument("--seed", action="store_true", help="post an in-progress seed check and exit without evaluating")
     args = parser.parse_args(argv)
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         print("::error::GITHUB_TOKEN is not set", file=sys.stderr)
         return 2
+    if args.seed:
+        if args.review_run:
+            parser.error("--seed cannot be used with --review-run")
+        if args.reconcile_open:
+            parser.error("--seed cannot be used with --reconcile-open")
+        return report(args.repo, args.sha, token, args.dry_run, seed=True)
     if args.review_run:
         if not args.sha:
             parser.error("--review-run requires --sha as its blocking fallback")

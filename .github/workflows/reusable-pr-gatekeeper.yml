@@ -26,6 +26,10 @@ on:
         description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
         type: string
         default: '["ubuntu-latest"]'
+      seed:
+        description: 'Post an in-progress seed check and exit without evaluating.'
+        type: boolean
+        default: false
 
 # Inherit the caller's explicit token permissions. Requiring a new scope here
 # before fleet callers receive it would make older callers fail to resolve.
@@ -63,9 +67,11 @@ jobs:
           PERSONA_REVIEW_REQUIRED: ${{ vars.PERSONA_REVIEW_REQUIRED }}
           REVIEW_RUN_ID: ${{ inputs.review_run_id }}
           HEAD_SHA: ${{ inputs.head_sha }}
+          SEED: ${{ inputs.seed || github.event_name == 'pull_request_target' }}
         run: |
           args=()
           if [ -n "$REVIEW_RUN_ID" ]; then args+=(--review-run "$REVIEW_RUN_ID"); fi
+          if [ "$SEED" = "true" ]; then args+=(--seed); fi
           python3 "${RUNNER_TEMP}/pr-gatekeeper.py" \
             --repo "${GITHUB_REPOSITORY}" \
             --sha "${HEAD_SHA}" "${args[@]}"
