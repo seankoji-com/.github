@@ -206,6 +206,11 @@ class TestDedupe(unittest.TestCase):
 
 
 class TestRecovery(unittest.TestCase):
+    def setUp(self):
+        prior = patch.object(pr_gatekeeper, "previous_publication_refs", return_value=set())
+        prior.start()
+        self.addCleanup(prior.stop)
+
     def test_http_error_records_failed_get_path(self):
         error = urllib.error.HTTPError("https://api.github.com/test", 403, "forbidden", {}, None)
         with patch.object(pr_gatekeeper.urllib.request, "urlopen", side_effect=error):
@@ -229,7 +234,7 @@ class TestRecovery(unittest.TestCase):
     def test_read_failure_posts_visible_failure_on_pr(self):
         for error in (ValueError("malformed response"), urllib.error.URLError("timeout")):
             with patch.object(pr_gatekeeper, "collect", side_effect=error), patch.object(pr_gatekeeper, "_post") as post:
-                self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake"), 0)
+                self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake"), 2)
                 body = post.call_args.args[2]
                 self.assertEqual(body["head_sha"], "abc")
                 self.assertEqual(body["conclusion"], "failure")
@@ -408,6 +413,207 @@ class TestPendingOverridesTerminal(unittest.TestCase):
             pr_gatekeeper.report("demo/repo", "abc", "fake")
             self.assertEqual(post.call_args.args[2]["conclusion"], "success")
 
+
+class TestReviewEventContract(unittest.TestCase):
+    def test_review_events_use_a_read_only_signal_and_trusted_followup(self):
+        import yaml
+        root = Path(__file__).resolve().parents[1]
+        caller = yaml.safe_load((root / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
+        events = caller.get("on", caller.get(True))
+        self.assertEqual(set(events["pull_request_review"]["types"]), {"submitted", "edited", "dismissed"})
+        self.assertEqual(caller["permissions"]["actions"], "read")
+        signal = caller["jobs"]["review-event"]
+        self.assertEqual(signal["permissions"], {"contents": "read"})
+        self.assertEqual(signal["if"], "github.event_name == 'pull_request_review'")
+        gate = caller["jobs"]["gatekeeper"]
+        self.assertIn("github.event_name == 'workflow_run'", gate["if"])
+        self.assertIn("github.event.workflow_run.event == 'pull_request_review'", gate["if"])
+        self.assertIn("github.event.workflow_run.pull_requests[0].head.sha", gate["with"]["head_sha"])
+        helper = yaml.safe_load((root / ".github/workflows/reusable-review-event.yml").read_text())
+        self.assertEqual(helper["permissions"], {"contents": "read"})
+        self.assertTrue(all("uses" not in step for step in helper["jobs"]["signal"]["steps"]))
+
+
+class TestPersonaReview(unittest.TestCase):
+    def review(self, state="APPROVED", sha="head", ident=1, **fields):
+        return dict({"id": ident, "state": state, "commit_id": sha,
+                     "submitted_at": "2026-09-19T00:00:00Z",
+                     "user": {"id": pr_gatekeeper.PERSONA_USER_ID, "type": "Bot"}}, **fields)
+
+    def test_only_current_bot_approval_passes(self):
+        verdict = pr_gatekeeper.persona_verdict
+        self.assertEqual(verdict([self.review()], "head"), ("completed", "success"))
+        for reviews in ([], [self.review(sha="old")],
+                        [self.review(user={"id": 1, "type": "Bot"})],
+                        [self.review(user={"id": pr_gatekeeper.PERSONA_USER_ID, "type": "User"})],
+                        [self.review(submitted_at=None)], [self.review(state="PENDING")]):
+            with self.subTest(reviews=reviews):
+                self.assertEqual(verdict(reviews, "head"), ("in_progress", None))
+
+    def test_latest_verdict_and_dismissal(self):
+        reviews = [self.review(), self.review("CHANGES_REQUESTED", ident=2)]
+        self.assertEqual(pr_gatekeeper.persona_verdict(reviews, "head"), ("completed", "failure"))
+        reviews[-1]["state"] = "DISMISSED"
+        self.assertEqual(pr_gatekeeper.persona_verdict(reviews, "head"), ("in_progress", None))
+        reviews[-1]["state"] = "APPROVED"
+        self.assertEqual(pr_gatekeeper.persona_verdict(reviews, "head"), ("completed", "success"))
+
+    def test_every_pr_sharing_sha_requires_its_own_review(self):
+        prs = [{"number": n, "head": {"sha": "head"}} for n in (1, 2)]
+        with patch.object(pr_gatekeeper, "_get", side_effect=[prs, [self.review()], []]):
+            checks = pr_gatekeeper.collect_persona_checks("org/repo", "head", "token")
+        self.assertEqual([c["status"] for c in checks], ["completed", "in_progress"])
+
+    def test_review_pagination(self):
+        reviews = [self.review(sha="old", ident=n) for n in range(100)]
+        prs = [{"number": 1, "head": {"sha": "head"}}]
+        with patch.object(pr_gatekeeper, "_get", side_effect=[prs, reviews, [self.review()]]):
+            self.assertEqual(pr_gatekeeper.collect_persona_checks("org/repo", "head", "token")[0]["conclusion"], "success")
+
+    def test_enforcement_holds_gate_and_read_failure_blocks(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[{"number": 1, "head": {"sha": "head"}}], []]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "head", "token")
+            self.assertEqual(post.call_args.args[2]["status"], "in_progress")
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=ValueError("invalid reviews")), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "head", "token")
+            self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+
+
+
+class TestReviewEventResolution(unittest.TestCase):
+
+    def pr(self):
+        return {"number": 7, "head": {"sha": "head", "ref": "fix", "repo": {"id": 42}},
+                "merge_commit_sha": "merge"}
+
+    def test_empty_fork_links_resolve_merge_sha_to_head(self):
+        event = {"event": "pull_request_review", "head_sha": "merge", "pull_requests": []}
+        with patch.object(pr_gatekeeper, "_get", side_effect=[event, [self.pr()]]):
+            self.assertEqual(pr_gatekeeper.resolve_review_heads("org/repo", 123, "token"), ["head"])
+
+    def test_delayed_review_resolves_current_head_by_fork_branch(self):
+        event = {"event": "pull_request_review", "head_sha": "old-merge", "pull_requests": [],
+                 "head_repository": {"id": 42}, "head_branch": "fix"}
+        with patch.object(pr_gatekeeper, "_get", side_effect=[event, [self.pr()]]):
+            self.assertEqual(pr_gatekeeper.resolve_review_heads("org/repo", 123, "token"), ["head"])
+
+    def test_missing_metadata_does_not_match_null_merge_sha(self):
+        event = {"event": "pull_request_review", "head_repository": None}
+        pr = self.pr(); pr["merge_commit_sha"] = None
+        with patch.object(pr_gatekeeper, "_get", side_effect=[event, [pr]]):
+            with self.assertRaisesRegex(ValueError, "associate"):
+                pr_gatekeeper.resolve_review_heads("org/repo", 123, "token")
+
+    def test_unassociated_signal_posts_blocking_fallback(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
+             patch.object(pr_gatekeeper, "resolve_review_heads", side_effect=ValueError("unassociated")), \
+             patch.object(pr_gatekeeper, "previous_publication_refs", return_value=set()), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "merge", "--review-run", "123"]), 2)
+            self.assertEqual(post.call_args.args[2]["head_sha"], "merge")
+            self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+
+    def test_approval_and_dismissal_update_both_refs_using_actual_head(self):
+        for state, expected in (("APPROVED", "success"), ("DISMISSED", None)):
+            review = TestPersonaReview().review(state=state)
+            with self.subTest(state=state), \
+                 patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+                 patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+                 patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [review]]), \
+                 patch.object(pr_gatekeeper, "_post") as post:
+                pr_gatekeeper.report("org/repo", "merge", "token")
+                bodies = [call.args[2] for call in post.call_args_list]
+                self.assertEqual({b["head_sha"] for b in bodies}, {"head", "merge"})
+                self.assertTrue(all(b.get("conclusion") == expected for b in bodies))
+                self.assertTrue(all(b["status"] == ("completed" if expected else "in_progress") for b in bodies))
+
+    def test_merge_event_requires_every_review_sharing_the_head(self):
+        sibling = dict(self.pr(), number=8, merge_commit_sha="other-merge")
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr(), sibling], [TestPersonaReview().review()], []]) as get, \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "merge", "token")
+            self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"head", "merge", "other-merge"})
+            self.assertTrue(all(c.args[2]["status"] == "in_progress" for c in post.call_args_list))
+            self.assertTrue(any("/pulls/8/reviews" in c.args[0] for c in get.call_args_list))
+
+    def test_pr_metadata_failure_recovers_previous_head_and_merge_destinations(self):
+        head, merge = "a" * 40, "b" * 40
+        previous = {"id": 9, "name": GATE_CHECK_NAME, "app": {"id": 15368},
+                    "output": {"summary": '<!-- gatekeeper-refs:["' + head + '", "' + merge + '"] --> <!-- gatekeeper-refs-complete -->'}}
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[ValueError("PR list unavailable"), {"check_runs": [previous]}]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", head, "token"), 2)
+            self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {head, merge})
+            self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_failed_recovery_retains_older_complete_metadata_across_pages(self):
+        head, merge = "a" * 40, "b" * 40
+        old = {"id": 1, "name": GATE_CHECK_NAME, "app": {"id": 15368},
+               "output": {"summary": '<!-- gatekeeper-refs:["' + head + '", "' + merge + '"] --> <!-- gatekeeper-refs-complete -->'}}
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=ValueError("API outage")), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", head, "token"), 2)
+            incomplete = post.call_args.args[2]
+        self.assertNotIn("<!-- gatekeeper-refs-complete -->", incomplete["output"]["summary"])
+        incomplete.update(id=2, app={"id": 15368})
+        page_one = [incomplete] + [{"id": n, "name": "other"} for n in range(99)]
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[ValueError("PR metadata unavailable"),
+                          {"check_runs": page_one}, {"check_runs": [old]}]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", head, "token"), 2)
+            self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {head, merge})
+            self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_overlapping_publications_share_one_repository_queue(self):
+        import yaml
+        root = Path(__file__).resolve().parent.parent
+        caller = yaml.safe_load((root / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
+        self.assertEqual(caller["concurrency"], {"group": "pr-gatekeeper-${{ github.repository }}",
+                                               "cancel-in-progress": False, "queue": "max"})
+
+    def test_partial_publication_attempts_all_refs_and_reports_failure(self):
+        for failed_ref in ("head", "merge"):
+            def fail_one(path, token, body):
+                if body["head_sha"] == failed_ref:
+                    raise urllib.error.URLError("temporary failure")
+            with self.subTest(failed_ref=failed_ref), \
+                 patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+                 patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+                 patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [TestPersonaReview().review("CHANGES_REQUESTED")]]), \
+                 patch.object(pr_gatekeeper, "_post", side_effect=fail_one) as post:
+                self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token"), 2)
+                self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"head", "merge"})
+                self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_review_read_failure_replaces_both_previous_green_gates(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], ValueError("unreadable"), {"check_runs": []}]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "head", "token")
+            self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"head", "merge"})
+            self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_mirrored_gate_preserves_red_merge_commit_checks(self):
+        def collect(repo, sha, token):
+            return ([run("merge test", conclusion="failure")] if sha == "merge" else [], EMPTY_STATUSES, [])
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", side_effect=collect), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [TestPersonaReview().review()]]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            pr_gatekeeper.report("org/repo", "head", "token")
+            self.assertEqual(len(post.call_args_list), 2)
+            self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
