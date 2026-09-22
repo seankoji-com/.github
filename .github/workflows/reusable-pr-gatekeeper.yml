@@ -67,7 +67,7 @@ jobs:
           PERSONA_REVIEW_REQUIRED: ${{ vars.PERSONA_REVIEW_REQUIRED }}
           REVIEW_RUN_ID: ${{ inputs.review_run_id }}
           HEAD_SHA: ${{ inputs.head_sha }}
-          SEED: ${{ inputs.seed || github.event_name == 'pull_request_target' }}
+          SEED: ${{ inputs.seed }}
         run: |
           args=()
           if [ -n "$REVIEW_RUN_ID" ]; then args+=(--review-run "$REVIEW_RUN_ID"); fi

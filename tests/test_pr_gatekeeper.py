@@ -9,6 +9,7 @@ let a red PR through.
 from __future__ import annotations
 
 import importlib.util
+import io
 import sys
 import unittest
 from unittest.mock import patch, MagicMock
@@ -447,23 +448,40 @@ class TestReviewEventContract(unittest.TestCase):
         self.assertFalse(inputs["seed"]["default"])
         step = next(s for s in reusable["jobs"]["all-checks-passed"]["steps"]
                     if s["name"] == "Evaluate and post the gate")
-        self.assertIn("--seed", step["run"])
+        self.assertEqual(step["env"]["SEED"], "${{ inputs.seed }}")
+        self.assertIn('if [ "$SEED" = "true" ]; then args+=(--seed); fi', step["run"])
 
 
 class TestSeed(unittest.TestCase):
     def test_seed_posts_in_progress_without_evaluation(self):
-        with patch.object(pr_gatekeeper, "collect") as collect_mock, \
-             patch.object(pr_gatekeeper, "_post") as post_mock:
-            self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", seed=True), 0)
-            collect_mock.assert_not_called()
-            self.assertEqual(post_mock.call_count, 1)
-            body = post_mock.call_args.args[2]
-            self.assertEqual(body["name"], GATE_CHECK_NAME)
-            self.assertEqual(body["head_sha"], "abc")
-            self.assertEqual(body["status"], "in_progress")
-            self.assertNotIn("conclusion", body)
-            self.assertEqual(body["output"]["title"], "Gate seeded, awaiting CI")
-            self.assertIn("Gate seeded on PR event", body["output"]["summary"])
+        for persona_required in ("true", "false"):
+            with self.subTest(persona_required=persona_required):
+                with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": persona_required}), \
+                     patch.object(pr_gatekeeper, "_get") as get_mock, \
+                     patch.object(pr_gatekeeper, "collect") as collect_mock, \
+                     patch.object(pr_gatekeeper, "_post") as post_mock:
+                    self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", seed=True), 0)
+                    get_mock.assert_not_called()
+                    collect_mock.assert_not_called()
+                    self.assertEqual(post_mock.call_count, 1)
+                    body = post_mock.call_args.args[2]
+                    self.assertEqual(body["name"], GATE_CHECK_NAME)
+                    self.assertEqual(body["head_sha"], "abc")
+                    self.assertEqual(body["status"], "in_progress")
+                    self.assertNotIn("conclusion", body)
+                    self.assertEqual(body["output"]["title"], "Gate seeded, awaiting CI")
+                    self.assertIn("Gate seeded on PR event", body["output"]["summary"])
+                    self.assertIn('<!-- gatekeeper-refs:["abc"] -->', body["output"]["summary"])
+
+    def test_seed_dry_run_does_not_post(self):
+        with patch.object(pr_gatekeeper, "_post") as post_mock:
+            self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", dry_run=True, seed=True), 0)
+            post_mock.assert_not_called()
+
+    def test_seed_post_failure_returns_error_code(self):
+        with patch.object(pr_gatekeeper, "_post", side_effect=urllib.error.URLError("network error")), \
+             patch("sys.stderr"):
+            self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", seed=True), 2)
 
     def test_main_seed_invokes_report_with_seed(self):
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
@@ -474,15 +492,25 @@ class TestSeed(unittest.TestCase):
 
     def test_main_seed_mutually_exclusive_with_reconcile(self):
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
-             patch("sys.stderr"):
-            with self.assertRaises(SystemExit):
+             patch("sys.stderr", new_callable=io.StringIO) as mock_stderr, \
+             patch.object(pr_gatekeeper, "report") as mock_report:
+            with self.assertRaises(SystemExit) as cm:
                 pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open", "--seed"])
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("--seed cannot be used with --reconcile-open", mock_stderr.getvalue())
+            mock_report.assert_not_called()
 
     def test_main_seed_mutually_exclusive_with_review_run(self):
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
-             patch("sys.stderr"):
-            with self.assertRaises(SystemExit):
+             patch("sys.stderr", new_callable=io.StringIO) as mock_stderr, \
+             patch.object(pr_gatekeeper, "resolve_review_heads") as mock_resolve, \
+             patch.object(pr_gatekeeper, "report") as mock_report:
+            with self.assertRaises(SystemExit) as cm:
                 pr_gatekeeper.main(["--repo", "demo/repo", "--sha", "abc", "--review-run", "123", "--seed"])
+            self.assertEqual(cm.exception.code, 2)
+            self.assertIn("--seed cannot be used with --review-run", mock_stderr.getvalue())
+            mock_resolve.assert_not_called()
+            mock_report.assert_not_called()
 
 
 class TestPersonaReview(unittest.TestCase):

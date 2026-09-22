@@ -417,6 +417,29 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
 
 
 def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None, seed: bool = False) -> int:
+    if seed:
+        title = "Gate seeded, awaiting CI"
+        summary = (
+            "Gate seeded on PR event. Awaiting workflow runs.\n\n"
+            f'<!-- gatekeeper-refs:{json.dumps([sha])} -->\n'
+            "<!-- gatekeeper-refs-complete -->"
+        )
+        print(f"in_progress / -: {title}")
+        if dry_run:
+            return 0
+        body = {
+            "name": GATE_CHECK_NAME,
+            "head_sha": sha,
+            "status": "in_progress",
+            "output": {"title": title, "summary": summary},
+        }
+        try:
+            _post(f"/repos/{repo}/check-runs", token, body)
+            return 0
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            print(f"::error::could not post the gate check run for {sha}: {exc}", file=sys.stderr)
+            return 2
+
     publish_refs = {sha}
     refs_complete = False
     result = 0
@@ -433,32 +456,26 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             publish_refs.update(ref for pr in prs
                                 for ref in (pr["head"]["sha"], pr.get("merge_commit_sha")) if ref)
             refs_complete = True
-            if not seed:
-                persona_checks = collect_persona_checks(repo, sha, token, prs)
-                # GitHub may prefer checks on its synthetic merge commit. Keep
-                # both refs current so a dismissed review cannot leave one green.
-                publish_refs.update(c[key] for c in persona_checks
-                                    for key in ("head_sha", "merge_sha") if c.get(key))
+            persona_checks = collect_persona_checks(repo, sha, token, prs)
+            # GitHub may prefer checks on its synthetic merge commit. Keep
+            # both refs current so a dismissed review cannot leave one green.
+            publish_refs.update(c[key] for c in persona_checks
+                                for key in ("head_sha", "merge_sha") if c.get(key))
         refs_complete = True
-        if seed:
-            status, conclusion = "in_progress", None
-            title = "Gate seeded, awaiting CI"
-            summary = "Gate seeded on PR event. Awaiting workflow runs."
-        else:
-            runs, statuses, suites = collect(repo, sha, token)
-            runs = runs + persona_checks
-            extra_summaries = []
-            for ref in sorted(publish_refs - {sha}):
-                other_status, other_conclusion, _, other_summary = evaluate(*collect(repo, ref, token))
-                runs = runs + [{"name": f"Checks on {ref}", "status": other_status,
-                                "conclusion": other_conclusion}]
-                extra_summaries.append(other_summary)
-            status, conclusion, title, summary = evaluate(runs, statuses, suites)
-            if extra_summaries:
-                summary += "\n\n" + "\n\n".join(extra_summaries)
-            if persona_checks:
-                summary += "\n\nGrumpy Engineer review of the current PR head is required.\n"
-                summary += "\n".join(c["marker"] for c in persona_checks)
+        runs, statuses, suites = collect(repo, sha, token)
+        runs = runs + persona_checks
+        extra_summaries = []
+        for ref in sorted(publish_refs - {sha}):
+            other_status, other_conclusion, _, other_summary = evaluate(*collect(repo, ref, token))
+            runs = runs + [{"name": f"Checks on {ref}", "status": other_status,
+                            "conclusion": other_conclusion}]
+            extra_summaries.append(other_summary)
+        status, conclusion, title, summary = evaluate(runs, statuses, suites)
+        if extra_summaries:
+            summary += "\n\n" + "\n\n".join(extra_summaries)
+        if persona_checks:
+            summary += "\n\nGrumpy Engineer review of the current PR head is required.\n"
+            summary += "\n".join(c["marker"] for c in persona_checks)
     except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
         # Recover independently of the failed PR-list/review-run request.
         # Every published verdict records its destinations for this purpose.
