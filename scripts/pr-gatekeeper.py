@@ -416,7 +416,30 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
         page += 1
 
 
-def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None) -> int:
+def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None, seed: bool = False) -> int:
+    if seed:
+        title = "Gate seeded, awaiting CI"
+        summary = (
+            "Gate seeded on PR event. Awaiting workflow runs.\n\n"
+            f'<!-- gatekeeper-refs:{json.dumps([sha])} -->\n'
+            "<!-- gatekeeper-refs-complete -->"
+        )
+        print(f"in_progress / -: {title}")
+        if dry_run:
+            return 0
+        body = {
+            "name": GATE_CHECK_NAME,
+            "head_sha": sha,
+            "status": "in_progress",
+            "output": {"title": title, "summary": summary},
+        }
+        try:
+            _post(f"/repos/{repo}/check-runs", token, body)
+            return 0
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            print(f"::error::could not post the gate check run for {sha}: {exc}", file=sys.stderr)
+            return 2
+
     publish_refs = {sha}
     refs_complete = False
     result = 0
@@ -496,11 +519,18 @@ def main(argv: list[str]) -> int:
     target.add_argument("--reconcile-open", action="store_true", help="refresh every open PR in this repository")
     parser.add_argument("--review-run", type=int, help="resolve the current PR head from a review signal run")
     parser.add_argument("--dry-run", action="store_true", help="evaluate without posting")
+    parser.add_argument("--seed", action="store_true", help="post an in-progress seed check and exit without evaluating")
     args = parser.parse_args(argv)
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         print("::error::GITHUB_TOKEN is not set", file=sys.stderr)
         return 2
+    if args.seed:
+        if args.review_run:
+            parser.error("--seed cannot be used with --review-run")
+        if args.reconcile_open:
+            parser.error("--seed cannot be used with --reconcile-open")
+        return report(args.repo, args.sha, token, args.dry_run, seed=True)
     if args.review_run:
         if not args.sha:
             parser.error("--review-run requires --sha as its blocking fallback")
