@@ -56,6 +56,33 @@ class NodeWorkflowTests(unittest.TestCase):
                     if should_run:
                         self.assertEqual((root / "invoked").read_text(), "run prettier:check\n")
 
+    def test_prettier_probe_failure_does_not_skip_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for manifest in (None, "{invalid json"):
+                with self.subTest(manifest=manifest):
+                    if manifest is not None:
+                        (root / "package.json").write_text(manifest)
+                    result = subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", self.steps["Prettier check"]["run"]],
+                        cwd=root, env={**os.environ, "PACKAGE_MANAGER": "npm"},
+                        capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn("skipping", result.stdout)
+            (root / "package.json").write_text('{"scripts": {}}')
+            node = root / "node"
+            node.write_text("#!/bin/sh\nexit 42\n")
+            node.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", self.steps["Prettier check"]["run"]],
+                cwd=root, env={**os.environ, "PACKAGE_MANAGER": "npm",
+                               "PATH": str(root) + os.pathsep + os.environ["PATH"]},
+                capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 42)
+            self.assertNotIn("skipping", result.stdout)
+
 
 class SharedWorkflowTests(unittest.TestCase):
     def test_staging_uses_reusable_workflow_sha_and_rejects_missing_identity(self):
@@ -79,13 +106,16 @@ class SharedWorkflowTests(unittest.TestCase):
                             ["bash", "-euo", "pipefail", "-c", stage["run"]], cwd=root,
                             env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
                                  "JOB_WORKFLOW_SHA": sha, "RUNNER_TEMP": directory,
-                                 "GITHUB_REPOSITORY": "example/app", "GITHUB_OUTPUT": str(root / "output")},
+                                 "GITHUB_REPOSITORY": "example/app", "GITHUB_OUTPUT": str(root / "output"),
+                                 "GITHUB_STEP_SUMMARY": str(root / "summary")},
                             capture_output=True, text=True,
                         )
                         self.assertEqual(fetch.exists(), len(sha) == 40)
                         if fetch.exists():
                             self.assertIn(f"/.github/{sha}/scripts/", fetch.read_text())
                         self.assertEqual(result.returncode, 0 if "agent-readiness" in name else 1)
+                        if "agent-readiness" in name:
+                            self.assertIn("Agent readiness unavailable", (root / "summary").read_text())
 
     def test_shellspec_is_pinned_and_runs_without_write_credentials(self):
         config = workflow("reusable-shellspec.yml")
