@@ -29,22 +29,70 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
+        timeout-minutes: 2
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # Self-hosted containers don't preinstall semgrep; --user installs may
-      # not land on PATH, so follow test.yml's --break-system-packages pattern.
+      # Avoid system pip mutation and unsupported --break-system-packages flags.
+      # Fresh venvs isolate scanners; the cache stores downloads, never executables.
+      - name: Prepare isolated Python environment
+        id: python
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys; assert sys.version_info >= (3, 10), "Scanners require Python >=3.10"'
+          python3 -c 'import sys; print("version=" + ".".join(map(str, sys.version_info[:2])))' >> "$GITHUB_OUTPUT"
+          python3 -m venv --clear "$RUNNER_TEMP/semgrep-venv"
+
+      - name: Restore scanner downloads
+        id: cache
+        if: steps.python.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/scanner-pip-cache
+          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-semgrep-1.176.0-pip-25.2
+
       - name: Install Semgrep
         id: install
+        if: steps.python.outcome == 'success'
         continue-on-error: true
+        timeout-minutes: 5
+        shell: bash
+        env:
+          PIP_CACHE_DIR: ${{ runner.temp }}/scanner-pip-cache
         run: |
-          set -uo pipefail
-          python3 -m pip install --quiet --break-system-packages "semgrep==1.176.0" \
-            || python3 -m pip install --quiet "semgrep==1.176.0"
+          set -euo pipefail
+          scanner_python="$RUNNER_TEMP/semgrep-venv/bin/python"
+          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
+            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==25.2"
+          # Semgrep 1.176 uses SDK 1.37 / semantic-conventions 0.58b0.
+          # Match instrumentation to that SDK instead of backtracking newer releases.
+          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
+            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "semgrep==1.176.0" \
+            "opentelemetry-instrumentation-requests==0.58b0" \
+            "opentelemetry-instrumentation-threading==0.58b0"
+          "$scanner_python" -m pip check
+          "$RUNNER_TEMP/semgrep-venv/bin/semgrep" --version
+          echo "$RUNNER_TEMP/semgrep-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Save scanner downloads
+        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/scanner-pip-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Run Semgrep scan
         id: scan
+        if: steps.install.outcome == 'success'
+        timeout-minutes: 5
         continue-on-error: true
         env:
           SEMGREP_SEND_METRICS: 'off'
@@ -77,6 +125,7 @@ jobs:
           exit 0
 
       - name: Upload results artifact
+        timeout-minutes: 1
         if: always()
         # Non-gating. An artifact-service failure must not fail the scan job;
         # findings are already in the step summary.
@@ -94,17 +143,59 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
+        timeout-minutes: 2
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      - name: Prepare isolated Python environment
+        id: python
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys; assert sys.version_info >= (3, 10), "Scanners require Python >=3.10"'
+          python3 -c 'import sys; print("version=" + ".".join(map(str, sys.version_info[:2])))' >> "$GITHUB_OUTPUT"
+          python3 -m venv --clear "$RUNNER_TEMP/zizmor-venv"
+
+      - name: Restore scanner downloads
+        id: cache
+        if: steps.python.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/scanner-pip-cache
+          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-zizmor-1.30.0-pip-25.2
+
       - name: Install zizmor
         id: install
+        if: steps.python.outcome == 'success'
         continue-on-error: true
+        timeout-minutes: 5
+        shell: bash
+        env:
+          PIP_CACHE_DIR: ${{ runner.temp }}/scanner-pip-cache
         run: |
-          set -uo pipefail
-          python3 -m pip install --quiet --break-system-packages "zizmor==1.30.0" \
-            || python3 -m pip install --quiet "zizmor==1.30.0"
+          set -euo pipefail
+          scanner_python="$RUNNER_TEMP/zizmor-venv/bin/python"
+          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
+            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==25.2"
+          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
+            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "zizmor==1.30.0"
+          "$scanner_python" -m pip check
+          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" --version
+          echo "$RUNNER_TEMP/zizmor-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Save scanner downloads
+        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
+        with:
+          path: ${{ runner.temp }}/scanner-pip-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       # No job-level `if: hashFiles(...)` guard here: that would evaluate
       # before checkout, always see an empty workspace, and silently disable
@@ -113,6 +204,8 @@ jobs:
       # continue-on-error.
       - name: Run zizmor scan
         id: scan
+        if: steps.install.outcome == 'success'
+        timeout-minutes: 5
         continue-on-error: true
         run: |
           set -uo pipefail
@@ -141,6 +234,7 @@ jobs:
           exit 0
 
       - name: Upload results artifact
+        timeout-minutes: 1
         if: always()
         # Non-gating. Findings are already in the step summary above.
         continue-on-error: true
