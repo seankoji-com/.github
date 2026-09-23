@@ -36,7 +36,8 @@ class SelectedHistoryTests(Base):
 
     def run_ci(self, root):
         output = io.StringIO()
-        with patch.dict(os.environ, {**GIT_ENV, "GITHUB_BASE_REF": "main",
+        git_env = {key: value for key, value in GIT_ENV.items() if key.startswith("GIT_")}
+        with patch.dict(os.environ, {**git_env, "GITHUB_BASE_REF": "main",
                                      "GITHUB_REPOSITORY": "example/fixture",
                                      "AGENT_READINESS_GIT_TOKEN": ""}), redirect_stderr(output), redirect_stdout(output):
             rc = ar.run_ci(root, "medium")
