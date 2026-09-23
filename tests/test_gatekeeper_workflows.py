@@ -78,6 +78,22 @@ class WorkflowInventoryTests(unittest.TestCase):
         self.assertIn('<!-- gatekeeper-refs:["head"] -->', summary)
         self.assertIn("<!-- gatekeeper-refs-complete -->", summary)
 
+    def test_oversized_destination_metadata_retains_evaluated_failure_marker(self):
+        refs = {f"{number:040x}" for number in range(1400)}
+        with patch.object(pr_gatekeeper, "previous_publication_refs", return_value=refs), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token", error="fixture failure"), 2)
+        body = post.call_args.args[2]
+        self.assertEqual(body["conclusion"], "failure")
+        self.assertEqual(body["output"]["title"], "Too many gate destinations")
+        summary = body["output"]["summary"]
+        self.assertLessEqual(len(summary.encode("utf-8")), 60000)
+        self.assertIn(pr_gatekeeper.EVALUATED_MARKER, summary)
+        self.assertNotIn("gatekeeper-refs-complete", summary)
+        check = {**body, "app": {"id": 15368}}
+        with patch.object(pr_gatekeeper, "_get", return_value={"check_runs": [check]}):
+            self.assertTrue(pr_gatekeeper.has_evaluated_gate("org/repo", "head", "token"))
+
     def test_pagination_reads_late_pending_workflow(self):
         first = [workflow(ident=n + 1, workflow_id=n + 1) for n in range(100)]
         with patch.object(pr_gatekeeper, "_get", side_effect=[

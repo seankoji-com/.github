@@ -5,7 +5,7 @@ The workflow emits GitHub's standard deployment_status signal. This suite pins
 the shape of the reusable workflow so a caller's `uses:` and `with:` block and
 the deployment-status mechanism do not drift.
 
-Hermetic: no token, no network, stdlib and PyYAML only.
+Hermetic: no token or network; requires Python, PyYAML and Node.js.
 """
 
 import json

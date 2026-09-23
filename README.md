@@ -39,11 +39,15 @@ Available reusable workflows include:
 - `reusable-link-check.yml`
 - `released.yml`
 
-Node CI accepts `pnpm`, `npm`, or `yarn` and uses the repository's `.nvmrc`
-before its `node-version` fallback. Docker builds keep a separate cache per
-`image-name`; set `cache-scope` when building multiple variants of the same image.
-ShellSpec runs the caller's `.shellspec` configuration with pinned ShellSpec and
-zsh on a GitHub-hosted runner. Callers need only `contents: read` permission.
+- [Node CI](.github/workflows/reusable-node-ci.yml) accepts `pnpm`, `npm`, or
+  `yarn`. An existing `.nvmrc` takes precedence over the `node-version` input.
+- [Docker builds](.github/workflows/reusable-docker-build-push.yml) require
+  `image-name`. Cache scope defaults to that image name; use `cache-scope` for
+  multiple variants. Scope must be nonempty and contain only letters, digits,
+  dot, underscore, slash, colon, `@` or hyphen.
+- [ShellSpec](.github/workflows/reusable-shellspec.yml) uses a pinned version on
+  a GitHub-hosted runner with zsh available. The caller's `.shellspec` selects
+  the shell, for example `--shell /bin/zsh`. The workflow needs `contents: read`.
 
 For example, a deployment workflow can publish the standard release marker:
 
@@ -56,6 +60,11 @@ jobs:
 ```
 
 ## Required persona review
+
+Use the [local gatekeeper caller](.github/workflows/call-reusable-pr-gatekeeper.yml)
+as the trigger and permissions reference. Its `head_sha` input identifies the
+commit to evaluate; retain the PR seed, workflow completion and review-event
+triggers when adapting it.
 
 The gate also waits for the latest Actions runs on the evaluated commit,
 including queued workflows that have not created job checks yet. It cannot
@@ -81,7 +90,8 @@ Report vulnerabilities using the instructions in [SECURITY.md](SECURITY.md).
 
 ## Validation
 
-With Python 3, Node.js, and PyYAML installed, run:
+With Python 3, Node.js, Bash and PyYAML (`pip install PyYAML==6.0.2`) installed,
+run from the repository root:
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'

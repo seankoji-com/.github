@@ -92,7 +92,7 @@ class SharedWorkflowTests(unittest.TestCase):
             stage = next(step for step in steps if "JOB_WORKFLOW_SHA" in step.get("env", {}))
             self.assertEqual(stage["env"]["JOB_WORKFLOW_SHA"], "${{ job.workflow_sha }}")
             with tempfile.TemporaryDirectory() as directory:
-                for sha in ("", "main", "a" * 39, "a" * 40):
+                for sha in ("", "main", "a" * 39, "a" * 40, "a" * 40 + "\nstaged=true", "\n" + "a" * 40):
                     with self.subTest(workflow=name, sha=sha):
                         # Stub network fetch: a valid SHA reaches curl with that
                         # exact ref; malformed identities never make a request.
@@ -102,6 +102,8 @@ class SharedWorkflowTests(unittest.TestCase):
                         curl.chmod(0o755)
                         fetch = root / "fetch"
                         fetch.unlink(missing_ok=True)
+                        (root / "output").write_text("")
+                        (root / "summary").write_text("")
                         result = subprocess.run(
                             ["bash", "-euo", "pipefail", "-c", stage["run"]], cwd=root,
                             env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
@@ -134,9 +136,19 @@ class SharedWorkflowTests(unittest.TestCase):
         config = workflow("reusable-docker-build-push.yml")
         inputs = config[True]["workflow_call"]["inputs"]
         self.assertEqual(inputs["cache-scope"]["default"], "")
-        build = config["jobs"]["build-and-push"]["steps"][-1]["with"]
+        job = config["jobs"]["build-and-push"]
+        self.assertEqual(job["env"]["CACHE_SCOPE"], "${{ inputs.cache-scope || inputs.image-name }}")
+        self.assertEqual(job["steps"][0]["name"], "Validate cache scope")
+        build = job["steps"][-1]["with"]
         for key in ("cache-from", "cache-to"):
-            self.assertIn("scope=${{ inputs.cache-scope || inputs.image-name }}", build[key])
+            self.assertIn("scope=${{ env.CACHE_SCOPE }}", build[key])
+        for scope, valid in (("ghcr.io/org/my-image", True), ("image:variant_2", True),
+                             ("", False), ("   ", False), ("safe,mode=max", False),
+                             ("safe\nmode=max", False), ("safe=unsafe", False)):
+            with self.subTest(scope=scope):
+                result = subprocess.run(["bash", "-euo", "pipefail", "-c", job["steps"][0]["run"]],
+                                        env={**os.environ, "CACHE_SCOPE": scope}, capture_output=True)
+                self.assertEqual(result.returncode == 0, valid)
 
     def test_link_checker_needs_no_write_token(self):
         self.assertEqual(workflow("reusable-link-check.yml")["permissions"], {"contents": "read"})

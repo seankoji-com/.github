@@ -604,6 +604,9 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
     if budget < 0:
         status, conclusion, title, result = "completed", "failure", "Too many gate destinations", 2
         summary = "Gate destination metadata exceeds GitHub's output limit; operator review required."
+        # A delayed seed must still re-evaluate this failure. Do not claim the
+        # omitted destination inventory is complete.
+        summary += "\n\n" + EVALUATED_MARKER
     else:
         if len(summary.encode("utf-8")) > budget:
             notice = "\n\nAdditional details omitted; inspect the repository Actions runs."

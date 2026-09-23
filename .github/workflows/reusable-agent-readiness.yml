@@ -68,7 +68,7 @@ jobs:
             echo "hub repo: using the checked-out checker"
             echo "staged=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          if ! echo "${JOB_WORKFLOW_SHA}" | grep -qE '^[0-9a-f]{40}$'; then
+          if [[ ! "${JOB_WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             unavailable "missing or invalid job.workflow_sha"
           fi
           REF="${JOB_WORKFLOW_SHA}"

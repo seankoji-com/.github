@@ -45,7 +45,7 @@ jobs:
         env:
           JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
-          if ! echo "${JOB_WORKFLOW_SHA}" | grep -qE '^[0-9a-f]{40}$'; then
+          if [[ ! "${JOB_WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error::Missing or invalid job.workflow_sha"
             exit 1
           fi
