@@ -17,6 +17,8 @@ class RecoveryRequestTests(unittest.TestCase):
     def test_caller_uses_only_pr_identity_and_is_advisory(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         caller = yaml.safe_load((ROOT / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
+        self.assertRegex(caller["jobs"]["recover-persona"]["uses"],
+                         r"@" + r"[0-9a-f]{40}$")
         self.assertEqual(caller["jobs"]["recover-persona"]["secrets"],
                          {"SEANKOJI_CI_PRIVATE_KEY": "${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}"})
         job = workflow["jobs"]["request"]

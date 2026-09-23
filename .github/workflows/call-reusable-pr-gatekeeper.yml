@@ -72,7 +72,7 @@ jobs:
     if: github.event_name == 'pull_request_target'
     permissions:
       contents: read
-    uses: seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@main
+    uses: seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@3c049bebd1bdcc683d36639ff40b767146ef0bb1
     with:
       target_repository: ${{ github.repository }}
       pr_number: ${{ format('{0}', github.event.pull_request.number) }}
