@@ -51,6 +51,7 @@ jobs:
           # green skip — the same escape hatch the checker itself honours.
           unavailable() {
             enforce="$(python3 -c 'import json;print(json.load(open(".agent-readiness.json")).get("enforce", False))' 2>/dev/null || echo False)"
+            printf 'staged=false\nreason=%s\n' "$1" >> "$GITHUB_OUTPUT"
             if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
               printf '### Agent readiness unavailable\n\nReason: %s\n\nEnforced: %s\n' "$1" "$enforce" >> "$GITHUB_STEP_SUMMARY"
             fi
@@ -58,7 +59,7 @@ jobs:
               echo "::error::agent-readiness checker unavailable: $1 (this repo enforces)"; exit 1
             fi
             echo "::warning::agent-readiness checker unavailable: $1 — advisory repo, skipping"
-            echo "staged=false" >> "$GITHUB_OUTPUT"; exit 0
+            exit 0
           }
           # The hub's own caller may use the same-commit relative form. In that
           # case the checkout already contains the checker under test.

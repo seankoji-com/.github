@@ -116,6 +116,7 @@ class SharedWorkflowTests(unittest.TestCase):
                         self.assertEqual(result.returncode, 0 if "agent-readiness" in name else 1)
                         if "agent-readiness" in name:
                             self.assertIn("Agent readiness unavailable", (root / "summary").read_text())
+                            self.assertIn("reason=", (root / "output").read_text())
 
     def test_shellspec_is_pinned_and_runs_without_write_credentials(self):
         config = workflow("reusable-shellspec.yml")

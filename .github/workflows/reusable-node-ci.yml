@@ -109,7 +109,7 @@ jobs:
       - name: Prettier check
         if: inputs.run-prettier
         run: |
-          has_prettier="$(node -e 'console.log(Object.hasOwn(require("./package.json").scripts || {}, "prettier:check"))')"
+          has_prettier="$(node -e 'console.log(Object.prototype.hasOwnProperty.call(require("./package.json").scripts || {}, "prettier:check"))')"
           if [ "$has_prettier" = "true" ]; then
             "$PACKAGE_MANAGER" run prettier:check
           else
