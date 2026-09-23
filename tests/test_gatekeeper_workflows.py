@@ -31,11 +31,11 @@ class WorkflowInventoryTests(unittest.TestCase):
                 self.assertEqual(self.verdict([workflow(conclusion=conclusion)]), ("completed", "failure"))
 
     def test_latest_attempt_and_replacement_run_win(self):
-        self.assertEqual(self.verdict([workflow(run_attempt=1, conclusion="failure"),
-                                       workflow(run_attempt=2)]), ("completed", "success"))
+        # The API replaces a rerun's entry with its current attempt.
+        self.assertEqual(self.verdict([workflow(run_attempt=2)]), ("completed", "success"))
         self.assertEqual(self.verdict([workflow(ident=2), workflow(ident=1, conclusion="cancelled")]),
                          ("completed", "success"))
-        self.assertEqual(self.verdict([workflow(run_attempt=2, status="queued", conclusion=None), workflow()]),
+        self.assertEqual(self.verdict([workflow(run_attempt=2, status="queued", conclusion=None)]),
                          ("in_progress", None))
 
     def test_old_heads_are_ignored_but_distinct_events_and_workflows_are_not(self):
@@ -50,6 +50,33 @@ class WorkflowInventoryTests(unittest.TestCase):
         self.assertEqual(self.verdict([workflow(path=pr_gatekeeper.GATE_WORKFLOW_PATH, status="in_progress")]),
                          ("completed", "success"))
         self.assertEqual(self.verdict([workflow(name="PR Gatekeeper", status="queued")]), ("in_progress", None))
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_RUN_ID": "1"}):
+            self.assertEqual(self.verdict([workflow(path=".github/workflows/renamed-gate.yml", status="in_progress")]),
+                             ("completed", "success"))
+            self.assertEqual(self.verdict([workflow(ident=2, status="queued")]), ("in_progress", None))
+
+    def test_workflow_labels_cannot_inject_markdown_and_include_recovery_link(self):
+        run = workflow(head_branch="`[unsafe](https://invalid.example)`" + "x" * 500,
+                       path=".github/workflows/`[unsafe](https://invalid.example).yml")
+        with patch.object(pr_gatekeeper, "_get", return_value={"workflow_runs": [run], "total_count": 1}):
+            checks, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+        name = checks[0]["name"]
+        self.assertLess(len(name), 500)
+        self.assertEqual(name.count("`"), 6)
+        self.assertIn("https://github.com/org/repo/actions/runs/1", name)
+        self.assertIn("rerun unsuccessful runs", name)
+
+    def test_summary_is_bounded_without_dropping_destination_markers(self):
+        checks = [{"name": str(n) + "x" * 500, "id": n, "status": "queued"} for n in range(200)]
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=(checks, EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token"), 0)
+        summary = post.call_args.args[2]["output"]["summary"]
+        self.assertLessEqual(len(summary.encode("utf-8")), 60000)
+        self.assertIn("Additional details omitted", summary)
+        self.assertIn('<!-- gatekeeper-refs:["head"] -->', summary)
+        self.assertIn("<!-- gatekeeper-refs-complete -->", summary)
 
     def test_pagination_reads_late_pending_workflow(self):
         first = [workflow(ident=n + 1, workflow_id=n + 1) for n in range(100)]
@@ -64,9 +91,20 @@ class WorkflowInventoryTests(unittest.TestCase):
 
     def test_malformed_or_truncated_inventory_fails_closed(self):
         for payload in ({}, {"workflow_runs": [], "total_count": 1001},
+                        {"workflow_runs": [], "total_count": 1},
+                        {"workflow_runs": [workflow(), workflow()], "total_count": 2},
                         {"workflow_runs": [workflow(head_sha=None)], "total_count": 1},
                         {"workflow_runs": [workflow(path=None)], "total_count": 1}):
             with self.subTest(payload=payload), patch.object(pr_gatekeeper, "_get", return_value=payload):
+                with self.assertRaises(ValueError):
+                    pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+
+    def test_missing_second_page_and_count_races_fail_closed(self):
+        first = [workflow(ident=n + 1, workflow_id=n + 1) for n in range(100)]
+        for second in ({"workflow_runs": [], "total_count": 101},
+                       {"workflow_runs": [], "total_count": 100}):
+            with self.subTest(second=second), patch.object(pr_gatekeeper, "_get", side_effect=[
+                    {"workflow_runs": first, "total_count": 101}, second]):
                 with self.assertRaises(ValueError):
                     pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
 

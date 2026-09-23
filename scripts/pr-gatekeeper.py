@@ -240,6 +240,8 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict]
     """Include registered workflows before they create their first check run."""
     latest = {}
     known_suites = set()
+    seen_runs = set()
+    expected_count = None
     page = 1
     while True:
         payload = _get(f"/repos/{repo}/actions/runs?head_sha={urllib.parse.quote(sha, safe='')}&per_page=100&page={page}", token)
@@ -247,7 +249,13 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict]
         count = payload.get("total_count")
         if not isinstance(count, int) or count < 0 or count > 1000:
             raise ValueError("invalid or truncated workflow run inventory")
+        if expected_count is not None and count != expected_count:
+            raise ValueError("workflow run inventory changed during pagination; retry")
+        expected_count = count
         for run in batch:
+            if not run.get("id") or run["id"] in seen_runs:
+                raise ValueError("missing or duplicate workflow run identity; retry")
+            seen_runs.add(run["id"])
             if not run.get("head_sha"):
                 raise ValueError("workflow run missing head SHA")
             if run["head_sha"] != sha:
@@ -255,7 +263,8 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict]
             path = run.get("path")
             if not isinstance(path, str) or not path or not run.get("workflow_id") or not run.get("id"):
                 raise ValueError("workflow run missing identity")
-            if path.split("@", 1)[0] == GATE_WORKFLOW_PATH:
+            if (str(run["id"]) == os.environ.get("GITHUB_RUN_ID")
+                    or path.split("@", 1)[0] == GATE_WORKFLOW_PATH):
                 continue
             if isinstance(run.get("check_suite_id"), int):
                 known_suites.add(run["check_suite_id"])
@@ -264,11 +273,19 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict]
             if key not in latest or order > latest[key][0]:
                 latest[key] = (order, run)
         if len(batch) < 100:
+            if len(seen_runs) != expected_count:
+                raise ValueError("incomplete workflow run inventory; retry")
             break
         page += 1
     selected_suites = {run.get("check_suite_id") for _, run in latest.values()}
+    def label(value):
+        # Inline code keeps fork-controlled paths/branches from becoming links.
+        return "`" + " ".join(str(value).split()).replace("`", "'")[:100] + "`"
+
     checks = [{"id": run["id"],
-             "name": f"Workflow {run['path']} ({key[1]}, {key[2]})",
+             "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); "
+                      f"[run {run['id']}](https://github.com/{repo}/actions/runs/{run['id']}). "
+                      "Resolve pending execution/approval or rerun unsuccessful runs"),
              "status": run.get("status"), "conclusion": run.get("conclusion")}
             for key, (_, run) in latest.items()]
     return checks, known_suites - selected_suites
@@ -540,9 +557,19 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         summary = f"Gate evaluation failed: {type(exc).__name__}. See the gatekeeper job log and retry."
         path = getattr(exc, "request_path", "unknown endpoint")
         print(f"::error::{title} at {path}: {exc}", file=sys.stderr)
-    summary += "\n\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
+    footer = "\n\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
     if refs_complete:
-        summary += "\n<!-- gatekeeper-refs-complete -->"
+        footer += "\n<!-- gatekeeper-refs-complete -->"
+    budget = 60000 - len(footer.encode("utf-8"))
+    if budget < 0:
+        status, conclusion, title, result = "completed", "failure", "Too many gate destinations", 2
+        summary = "Gate destination metadata exceeds GitHub's output limit; operator review required."
+    else:
+        if len(summary.encode("utf-8")) > budget:
+            notice = "\n\nAdditional details omitted; inspect the repository Actions runs."
+            summary = summary.encode("utf-8")[:max(0, budget - len(notice))].decode("utf-8", errors="ignore") + notice
+            summary = summary.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        summary += footer
     print(f"{status} / {conclusion or '-'}: {title}")
     if dry_run:
         return 0
