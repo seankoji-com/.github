@@ -17,7 +17,7 @@ def workflow(ident=1, **fields):
 class WorkflowInventoryTests(unittest.TestCase):
     def verdict(self, runs):
         with patch.object(pr_gatekeeper, "_get", return_value={"workflow_runs": runs, "total_count": len(runs)}):
-            checks = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+            checks, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
         return pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2]
 
     def test_zero_job_workflows_wait_for_every_nonterminal_state(self):
@@ -57,7 +57,7 @@ class WorkflowInventoryTests(unittest.TestCase):
                 {"workflow_runs": first, "total_count": 101},
                 {"workflow_runs": [workflow(ident=101, workflow_id=101, status="queued")], "total_count": 101},
         ]) as get:
-            checks = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+            checks, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
         self.assertEqual(len(checks), 101)
         self.assertIn("head_sha=head&per_page=100&page=2", get.call_args.args[0])
         self.assertEqual(pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2], ("in_progress", None))
@@ -69,6 +69,35 @@ class WorkflowInventoryTests(unittest.TestCase):
             with self.subTest(payload=payload), patch.object(pr_gatekeeper, "_get", return_value=payload):
                 with self.assertRaises(ValueError):
                     pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+
+    def test_superseded_suites_are_removed_without_hiding_other_workflow_failure(self):
+        for other_failure in (False, True):
+            with self.subTest(other_failure=other_failure):
+                workflows = [workflow(ident=1, check_suite_id=101, conclusion="cancelled"),
+                             workflow(ident=2, check_suite_id=102)]
+                checks = [{"id": 1, "name": "test", "check_suite": {"id": 101},
+                           "status": "completed", "conclusion": "cancelled"},
+                          {"id": 2, "name": "test", "check_suite": {"id": 102},
+                           "status": "completed", "conclusion": "success"}]
+                suites = [{"id": 101, "status": "in_progress", "latest_check_runs_count": 1}]
+                if other_failure:
+                    workflows.append(workflow(ident=3, workflow_id=20, check_suite_id=103, conclusion="failure"))
+                    checks.append({"id": 3, "name": "test", "check_suite": {"id": 103},
+                                   "status": "completed", "conclusion": "failure"})
+                with patch.object(pr_gatekeeper, "_get", side_effect=[
+                        {"check_runs": checks}, EMPTY_STATUSES, {"check_suites": suites},
+                        {"workflow_runs": workflows, "total_count": len(workflows)}]):
+                    collected = pr_gatekeeper.collect("org/repo", "head", "token")
+                self.assertFalse(any(c.get("check_suite", {}).get("id") == 101 for c in collected[0]))
+                self.assertEqual(collected[2], [])
+                self.assertEqual(pr_gatekeeper.evaluate(*collected)[1], "failure" if other_failure else "success")
+
+    def test_suite_still_selected_by_another_run_is_not_superseded(self):
+        runs = [workflow(ident=1, check_suite_id=101), workflow(ident=2, check_suite_id=102),
+                workflow(ident=3, workflow_id=20, check_suite_id=101, status="queued")]
+        with patch.object(pr_gatekeeper, "_get", return_value={"workflow_runs": runs, "total_count": 3}):
+            _, superseded = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+        self.assertEqual(superseded, set())
 
     def test_workflow_api_failure_posts_blocking_gate(self):
         with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "false"}), \

@@ -236,9 +236,10 @@ def _batch(payload: object, key: str) -> list[dict]:
     return batch
 
 
-def collect_workflow_checks(repo: str, sha: str, token: str) -> list[dict]:
+def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int]]:
     """Include registered workflows before they create their first check run."""
     latest = {}
+    known_suites = set()
     page = 1
     while True:
         payload = _get(f"/repos/{repo}/actions/runs?head_sha={urllib.parse.quote(sha, safe='')}&per_page=100&page={page}", token)
@@ -256,6 +257,8 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> list[dict]:
                 raise ValueError("workflow run missing identity")
             if path.split("@", 1)[0] == GATE_WORKFLOW_PATH:
                 continue
+            if isinstance(run.get("check_suite_id"), int):
+                known_suites.add(run["check_suite_id"])
             key = (run["workflow_id"], run.get("event"), run.get("head_branch"))
             order = (run["id"], run.get("run_attempt") or 1)
             if key not in latest or order > latest[key][0]:
@@ -263,10 +266,12 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> list[dict]:
         if len(batch) < 100:
             break
         page += 1
-    return [{"id": run["id"],
+    selected_suites = {run.get("check_suite_id") for _, run in latest.values()}
+    checks = [{"id": run["id"],
              "name": f"Workflow {run['path']} ({key[1]}, {key[2]})",
              "status": run.get("status"), "conclusion": run.get("conclusion")}
             for key, (_, run) in latest.items()]
+    return checks, known_suites - selected_suites
 
 
 def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | None = None) -> tuple[list, dict, list]:
@@ -311,7 +316,12 @@ def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | Non
             break
         page += 1
 
-    runs.extend(collect_workflow_checks(repo, workflow_sha or ref, token))
+    workflow_checks, superseded_suites = collect_workflow_checks(repo, workflow_sha or ref, token)
+    # A new workflow run on the same SHA can replace a canceled older suite.
+    # Keep suites from distinct workflows, even when their job names match.
+    runs = [run for run in runs if (run.get("check_suite") or {}).get("id") not in superseded_suites]
+    suites = [suite for suite in suites if suite.get("id") not in superseded_suites]
+    runs.extend(workflow_checks)
     return runs, statuses, suites
 
 
