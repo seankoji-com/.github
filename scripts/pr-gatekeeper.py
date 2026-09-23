@@ -57,6 +57,7 @@ GATE_CHECK_NAME = "gatekeeper / all-checks-passed"
 PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
 PERSONA_CHECK_NAME = "persona / grumpy-engineer"
 GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
+EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->"
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
 # GitHub adds tomorrow pass silently; anything unrecognised must block.
@@ -466,7 +467,7 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
         for check in batch:
             if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != 15368:
                 continue
-            summary = (check.get("output") or {}).get("summary", "")
+            summary = (check.get("output") or {}).get("summary") or ""
             if "<!-- gatekeeper-refs-complete -->" not in summary:
                 continue
             match = re.search(r"<!-- gatekeeper-refs:(\[.*?\]) -->", summary)
@@ -481,8 +482,46 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
         page += 1
 
 
+def has_evaluated_gate(repo: str, sha: str, token: str) -> bool:
+    """A delayed seed must refresh an evaluated gate, not erase its verdict."""
+    page = 1
+    ref = sha
+    while True:
+        try:
+            payload = _get(f"/repos/{repo}/commits/{ref}/check-runs?filter=all&per_page=100&page={page}", token)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (404, 422) or ref != sha:
+                raise
+            alternate = _open_pr_ref(repo, sha, token)
+            if alternate is None or alternate == sha:
+                raise
+            ref, page = alternate, 1
+            continue
+        batch = _batch(payload, "check_runs")
+        for check in batch:
+            if ref != sha and check.get("head_sha") != sha:
+                continue
+            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != 15368:
+                continue
+            output = check.get("output") or {}
+            summary = output.get("summary") or ""
+            title = output.get("title") or ""
+            if (EVALUATED_MARKER in summary or
+                    ("<!-- gatekeeper-refs-complete -->" in summary and title
+                     and title != "Gate seeded, awaiting CI")):
+                return True
+        if len(batch) < 100:
+            return False
+        page += 1
+
+
 def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None, seed: bool = False) -> int:
     if seed:
+        try:
+            if has_evaluated_gate(repo, sha, token):
+                return report(repo, sha, token, dry_run=dry_run)
+        except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            return report(repo, sha, token, dry_run=dry_run, error=str(exc))
         title = "Gate seeded, awaiting CI"
         summary = (
             "Gate seeded on PR event. Awaiting workflow runs.\n\n"
@@ -557,7 +596,8 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         summary = f"Gate evaluation failed: {type(exc).__name__}. See the gatekeeper job log and retry."
         path = getattr(exc, "request_path", "unknown endpoint")
         print(f"::error::{title} at {path}: {exc}", file=sys.stderr)
-    footer = "\n\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
+    footer = "\n\n" + EVALUATED_MARKER
+    footer += "\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
     if refs_complete:
         footer += "\n<!-- gatekeeper-refs-complete -->"
     budget = 60000 - len(footer.encode("utf-8"))

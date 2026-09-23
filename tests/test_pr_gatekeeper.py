@@ -459,11 +459,11 @@ class TestSeed(unittest.TestCase):
         for persona_required in ("true", "false"):
             with self.subTest(persona_required=persona_required):
                 with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": persona_required}), \
-                     patch.object(pr_gatekeeper, "_get") as get_mock, \
+                     patch.object(pr_gatekeeper, "_get", return_value={"check_runs": []}) as get_mock, \
                      patch.object(pr_gatekeeper, "collect") as collect_mock, \
                      patch.object(pr_gatekeeper, "_post") as post_mock:
                     self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", seed=True), 0)
-                    get_mock.assert_not_called()
+                    get_mock.assert_called_once()
                     collect_mock.assert_not_called()
                     self.assertEqual(post_mock.call_count, 1)
                     body = post_mock.call_args.args[2]
@@ -476,12 +476,14 @@ class TestSeed(unittest.TestCase):
                     self.assertIn('<!-- gatekeeper-refs:["abc"] -->', body["output"]["summary"])
 
     def test_seed_dry_run_does_not_post(self):
-        with patch.object(pr_gatekeeper, "_post") as post_mock:
+        with patch.object(pr_gatekeeper, "has_evaluated_gate", return_value=False), \
+             patch.object(pr_gatekeeper, "_post") as post_mock:
             self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", dry_run=True, seed=True), 0)
             post_mock.assert_not_called()
 
     def test_seed_post_failure_returns_error_code(self):
-        with patch.object(pr_gatekeeper, "_post", side_effect=urllib.error.URLError("network error")), \
+        with patch.object(pr_gatekeeper, "has_evaluated_gate", return_value=False), \
+             patch.object(pr_gatekeeper, "_post", side_effect=urllib.error.URLError("network error")), \
              patch("sys.stderr"):
             self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", seed=True), 2)
 

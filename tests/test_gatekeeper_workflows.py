@@ -157,5 +157,69 @@ class WorkflowInventoryTests(unittest.TestCase):
         self.assertNotIn("conclusion", post.call_args.args[2])
 
 
+class DelayedSeedTests(unittest.TestCase):
+    def gate(self, title="All checks passed", summary=None, **fields):
+        return {"name": pr_gatekeeper.GATE_CHECK_NAME, "app": {"id": 15368},
+                "output": {"title": title, "summary": summary if summary is not None else
+                           '<!-- gatekeeper-refs:["head"] -->\n<!-- gatekeeper-refs-complete -->'}, **fields}
+
+    def test_only_a_real_evaluated_gate_triggers_refresh(self):
+        for check, expected in (
+                (self.gate(), True),
+                (self.gate(title="Waiting on 1 check"), True),
+                (self.gate(title="1 check failing"), True),
+                (self.gate(title="Gate seeded, awaiting CI"), False),
+                (self.gate(title="", summary=pr_gatekeeper.EVALUATED_MARKER), True),
+                (self.gate(output={"title": None, "summary": None}), False),
+                (self.gate(app={"id": 999}), False),
+                (self.gate(name="test"), False)):
+            with self.subTest(check=check), patch.object(pr_gatekeeper, "_get", return_value={"check_runs": [check]}):
+                self.assertEqual(pr_gatekeeper.has_evaluated_gate("org/repo", "head", "token"), expected)
+
+    def test_null_wrapper_summary_does_not_prevent_destination_recovery(self):
+        sha = "a" * 40
+        checks = [self.gate(output={"summary": None}),
+                  self.gate(summary=f'<!-- gatekeeper-refs:["{sha}"] -->\n<!-- gatekeeper-refs-complete -->')]
+        with patch.object(pr_gatekeeper, "_get", return_value={"check_runs": checks}):
+            self.assertEqual(pr_gatekeeper.previous_publication_refs("org/repo", sha, "token"), {sha})
+
+    def test_evaluated_gate_is_found_on_later_page(self):
+        with patch.object(pr_gatekeeper, "_get", side_effect=[
+                {"check_runs": [self.gate(name="test")] * 100}, {"check_runs": [self.gate()]}]) as get:
+            self.assertTrue(pr_gatekeeper.has_evaluated_gate("org/repo", "head", "token"))
+        self.assertIn("page=2", get.call_args.args[0])
+
+    def test_seed_lookup_preserves_branch_fallback_without_accepting_moved_heads(self):
+        missing = urllib.error.HTTPError("https://api.github.com/test", 422, "missing", {}, None)
+        for head, expected in (("head", True), ("moved", False)):
+            with self.subTest(head=head), patch.object(pr_gatekeeper, "_get", side_effect=[
+                    missing, [{"head": {"sha": "head", "ref": "codex/fix"}}],
+                    {"check_runs": [self.gate(head_sha=head)]}]) as get:
+                self.assertEqual(pr_gatekeeper.has_evaluated_gate("org/repo", "head", "token"), expected)
+            self.assertIn("commits/codex%2Ffix/check-runs", get.call_args.args[0])
+
+    def test_delayed_seed_rechecks_current_ci_instead_of_erasing_prior_verdict(self):
+        for status, conclusion in (("completed", "success"), ("queued", None), ("completed", "failure")):
+            checks = [{"name": "test", "status": status, "conclusion": conclusion}]
+            with self.subTest(status=status, conclusion=conclusion), \
+                 patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "false"}), \
+                 patch.object(pr_gatekeeper, "_get", return_value={"check_runs": [self.gate()]}), \
+                 patch.object(pr_gatekeeper, "collect", return_value=(checks, EMPTY_STATUSES, [])) as collect, \
+                 patch.object(pr_gatekeeper, "_post") as post:
+                self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token", seed=True), 0)
+            collect.assert_called_once()
+            body = post.call_args.args[2]
+            self.assertNotEqual(body["output"]["title"], "Gate seeded, awaiting CI")
+            self.assertEqual(body.get("conclusion"), conclusion)
+            self.assertEqual(body["status"], "in_progress" if status == "queued" else status)
+
+    def test_seed_read_failure_blocks_instead_of_assuming_no_prior_verdict(self):
+        with patch.object(pr_gatekeeper, "has_evaluated_gate", side_effect=urllib.error.URLError("unavailable")), \
+             patch.object(pr_gatekeeper, "previous_publication_refs", return_value=set()), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token", seed=True), 2)
+        self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+
+
 if __name__ == "__main__":
     unittest.main()
