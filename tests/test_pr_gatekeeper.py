@@ -565,6 +565,49 @@ class TestPersonaReview(unittest.TestCase):
 
 
 
+    def test_dispatch_wait_running_and_recovered_verdict(self):
+        pr = {"number": 42, "head": {"sha": "head"}, "merge_commit_sha": None,
+              "updated_at": "2026-09-23T00:00:00Z"}
+        old = self.review("CHANGES_REQUESTED", sha="old")
+        current = self.review("APPROVED", sha="head", ident=2)
+        prior = []
+        for state, reviews, expected_status, expected_title in (
+                ("", [old], "in_progress", "waiting for review dispatch"),
+                ("running", [old], "in_progress", "review running"),
+                ("", [old, current], "completed", "All checks passed")):
+            with self.subTest(state=state, reviews=len(reviews)), \
+                 patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+                 patch.object(pr_gatekeeper, "collect", return_value=(prior, EMPTY_STATUSES, [])), \
+                 patch.object(pr_gatekeeper, "_get", side_effect=[[pr], reviews]), \
+                 patch.object(pr_gatekeeper, "_post") as post:
+                self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token",
+                               persona_state=state, persona_pr=42 if state else 0), 0)
+                body = post.call_args.args[2]
+                self.assertEqual(body["status"], expected_status)
+                self.assertIn(expected_title, body["output"]["title"])
+                prior = [dict(body, id=100, app={"id": 15368})]
+
+    def test_overdue_and_failed_dispatch_are_visible(self):
+        check = {"number": 42, "head_sha": "a" * 40, "updated_at": "2020-01-01T00:00:00Z",
+                 "status": "in_progress", "conclusion": None}
+        progress = pr_gatekeeper.persona_progress([check], [])
+        self.assertIn("waiting for review dispatch; alert:", progress[0])
+        self.assertEqual(check["status"], "in_progress")
+        progress = pr_gatekeeper.persona_progress([check], [], "failed", 42)
+        self.assertIn("review dispatch or job failed", progress[0])
+        self.assertEqual((check["status"], check["conclusion"]), ("completed", "failure"))
+
+    def test_running_signal_survives_gate_refresh_only_for_its_head(self):
+        sha = "a" * 40
+        prior = {"name": GATE_CHECK_NAME, "output": {"summary":
+                 f"<!-- grumpy-dispatch:42:{sha}:running:2020-01-01T00:00:00Z -->"}}
+        check = {"number": 42, "head_sha": sha, "updated_at": "2026-09-23T00:00:00Z",
+                 "status": "in_progress", "conclusion": None}
+        self.assertIn("review running; alert:", pr_gatekeeper.persona_progress([check], [prior])[0])
+        newer = dict(check, head_sha="b" * 40)
+        self.assertIn("waiting for review dispatch", pr_gatekeeper.persona_progress([newer], [prior])[0])
+
+
 class TestReviewEventResolution(unittest.TestCase):
 
     def pr(self):

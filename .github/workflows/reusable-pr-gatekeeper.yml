@@ -30,6 +30,14 @@ on:
         description: 'Post an in-progress seed check and exit without evaluating.'
         type: boolean
         default: false
+      persona_state:
+        description: 'Private controller signal for the Grumpy review job.'
+        type: string
+        default: ''
+      persona_pr:
+        description: 'PR number for the exact-head persona signal.'
+        type: string
+        default: ''
 
 # Inherit the caller's explicit token permissions. Requiring a new scope here
 # before fleet callers receive it would make older callers fail to resolve.
@@ -68,10 +76,18 @@ jobs:
           REVIEW_RUN_ID: ${{ inputs.review_run_id }}
           HEAD_SHA: ${{ inputs.head_sha }}
           SEED: ${{ inputs.seed }}
+          PERSONA_STATE: ${{ inputs.persona_state }}
+          PERSONA_PR: ${{ inputs.persona_pr }}
         run: |
           args=()
           if [ -n "$REVIEW_RUN_ID" ]; then args+=(--review-run "$REVIEW_RUN_ID"); fi
           if [ "$SEED" = "true" ]; then args+=(--seed); fi
+          if [ -n "$PERSONA_STATE" ] && [[ "$PERSONA_PR" =~ ^[0-9]{1,12}$ ]]; then
+            args+=(--persona-state "$PERSONA_STATE" --persona-pr "$PERSONA_PR")
+          elif [ -n "$PERSONA_STATE" ] || [ -n "$PERSONA_PR" ]; then
+            echo '::error::Invalid persona signal inputs'
+            exit 1
+          fi
           python3 "${RUNNER_TEMP}/pr-gatekeeper.py" \
             --repo "${GITHUB_REPOSITORY}" \
             --sha "${HEAD_SHA}" "${args[@]}"

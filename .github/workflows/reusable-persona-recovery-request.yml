@@ -1,0 +1,80 @@
+name: Request persona recovery
+
+# The caller runs on pull_request_target and passes only repository, PR number,
+# and head SHA. No PR code is checked out and no diff enters Actions logs.
+on:
+  workflow_call:
+    inputs:
+      target_repository:
+        required: true
+        type: string
+      pr_number:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+
+jobs:
+  request:
+    runs-on: ubuntu-latest # runner-keep-hosted
+    permissions:
+      contents: read
+    steps:
+      - name: Validate target
+        id: validate
+        continue-on-error: true # advisory during rollout
+        env:
+          TARGET_REPO: ${{ inputs.target_repository }}
+          TARGET_PR: ${{ inputs.pr_number }}
+          TARGET_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_REPO" =~ ^seankoji-com/[A-Za-z0-9_.-]+$ ]]
+          [[ "$TARGET_PR" =~ ^[0-9]{1,12}$ ]]
+          [[ "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Mint private controller dispatch token
+        id: token
+        if: steps.validate.outcome == 'success'
+        continue-on-error: true # the required gate still waits for a verdict
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SEANKOJI_CI_APP_ID }}
+          private-key: ${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}
+          owner: seankoji-com
+          repositories: .github-private
+      - name: Request review recovery for this head
+        id: dispatch
+        if: steps.token.outcome == 'success'
+        continue-on-error: true # failure is visible in the gate's waiting alert
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          TARGET_REPO: ${{ inputs.target_repository }}
+          TARGET_PR: ${{ inputs.pr_number }}
+          TARGET_SHA: ${{ inputs.head_sha }}
+        run: |
+          set -euo pipefail
+          workflow='repos/seankoji-com/.github-private/actions/workflows/persona-review-reconcile.yml/runs?event=repository_dispatch&per_page=100'
+          before=$(gh api "$workflow" --jq '[.workflow_runs[].id] | max // 0')
+          expected="Persona recovery ${TARGET_REPO}#${TARGET_PR} @ ${TARGET_SHA}"
+          for attempt in 1 2; do
+            echo "::notice::Recovery delivery attempt $attempt"
+            jq -n --arg repo "$TARGET_REPO" --argjson pr "$TARGET_PR" \
+              --arg sha "$TARGET_SHA" \
+              '{event_type:"persona-review-reconcile-requested",
+                client_payload:{repository:$repo,pull_number:$pr,head_sha:$sha}}' \
+              | gh api -X POST repos/seankoji-com/.github-private/dispatches --input - >/dev/null
+            for _ in 1 2 3 4 5 6; do
+              sleep 10
+              if gh api "$workflow" \
+                   | jq -e --arg title "$expected" --argjson before "$before" \
+                       'any(.workflow_runs[]; .display_title == $title and .id > $before)' >/dev/null; then
+                exit 0
+              fi
+            done
+          done
+          echo '::error::Private persona recovery dispatch was accepted but no workflow run appeared'
+          exit 1
+      - name: Show delivery warning
+        if: always() && (steps.validate.outcome != 'success' || steps.token.outcome != 'success' || steps.dispatch.outcome != 'success')
+        run: echo '::warning::Persona recovery signal failed; the review gate will keep waiting and the scheduled sweep can retry'

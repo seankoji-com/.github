@@ -24,4 +24,5 @@ jobs:
         run: |
           python3 tests/test_agent_readiness.py
           python3 tests/test_pr_gatekeeper.py
+          python3 tests/test_persona_recovery_request.py
           python3 tests/test_released_workflow.py
