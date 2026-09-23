@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import html
 import json
 import os
 import re
@@ -693,6 +694,7 @@ def run_ci(root: Path, fail_on: str) -> int:
     base_ref = os.environ.get("GITHUB_BASE_REF", "")
     head = audit_repo(root, name)
     reports, ratchet = [head], False
+    unavailable = ""
     if base_ref:
         try:
             from agent_readiness_git import prepare_ci_git
@@ -711,16 +713,20 @@ def run_ci(root: Path, fail_on: str) -> int:
                 finally:
                     git("worktree", "remove", "--force", str(wt))
             if base.blocked:
-                print(f"::warning::base scan blocked ({base.findings[0].message})", file=sys.stderr)
+                unavailable = f"base scan blocked ({base.findings[0].message})"
+                print(f"::warning::{unavailable}", file=sys.stderr)
             else:
                 reports, ratchet = apply_baseline([head], to_json([base]), renames), True
         except (ImportError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            unavailable = str(exc)
             print(f"::warning::could not score merge-base with {base_ref} ({exc})", file=sys.stderr)
     print(render_human(reports, ratchet), file=sys.stderr)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as fh:
             fh.write(render_markdown(reports, ratchet))
+            if base_ref and not ratchet:
+                fh.write("\nRatchet unavailable: <pre>" + html.escape(unavailable[:1000]) + "</pre>\n")
     if base_ref and not ratchet:
         if head.enforce:
             print("::error::exact merge-base unavailable in a repo with \"enforce\": true", file=sys.stderr)

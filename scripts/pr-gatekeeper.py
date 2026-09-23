@@ -237,7 +237,21 @@ def _batch(payload: object, key: str) -> list[dict]:
     return batch
 
 
+class WorkflowInventoryDrift(ValueError):
+    """A paginated run inventory changed or was incomplete during the read."""
+
+
 def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int]]:
+    for attempt in range(3):
+        try:
+            return _collect_workflow_checks(repo, sha, token)
+        except WorkflowInventoryDrift:
+            if attempt == 2:
+                raise
+            time.sleep(1)
+
+
+def _collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int]]:
     """Include registered workflows before they create their first check run."""
     latest = {}
     known_suites = set()
@@ -251,11 +265,13 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict]
         if not isinstance(count, int) or count < 0 or count > 1000:
             raise ValueError("invalid or truncated workflow run inventory")
         if expected_count is not None and count != expected_count:
-            raise ValueError("workflow run inventory changed during pagination; retry")
+            raise WorkflowInventoryDrift("workflow run inventory changed during pagination; retry")
         expected_count = count
         for run in batch:
-            if not run.get("id") or run["id"] in seen_runs:
-                raise ValueError("missing or duplicate workflow run identity; retry")
+            if not run.get("id"):
+                raise ValueError("missing workflow run identity")
+            if run["id"] in seen_runs:
+                raise WorkflowInventoryDrift("duplicate workflow run identity; retry")
             seen_runs.add(run["id"])
             if not run.get("head_sha"):
                 raise ValueError("workflow run missing head SHA")
@@ -275,7 +291,7 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict]
                 latest[key] = (order, run)
         if len(batch) < 100:
             if len(seen_runs) != expected_count:
-                raise ValueError("incomplete workflow run inventory; retry")
+                raise WorkflowInventoryDrift("incomplete workflow run inventory; retry")
             break
         page += 1
     selected_suites = {run.get("check_suite_id") for _, run in latest.values()}

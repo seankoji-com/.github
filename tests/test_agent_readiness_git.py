@@ -106,11 +106,16 @@ class SelectedHistoryTests(Base):
             (root / ar.CONFIG_FILE).write_text(json.dumps({"always": True, "enforce": enforced}))
             for missing_helper in (False, True):
                 with self.subTest(enforced=enforced, missing_helper=missing_helper):
-                    with patch.dict("sys.modules", {"agent_readiness_git": None} if missing_helper else {}):
+                    summary = self.root / "summary.md"
+                    summary.write_text("")
+                    with patch.dict("sys.modules", {"agent_readiness_git": None} if missing_helper else {}), \
+                         patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
                         rc, output = self.run_ci(root)
                     self.assertEqual(rc, 2 if enforced else 0, output)
                     self.assertIn("merge-base", output)
                     self.assertNotIn("regressions vs base", output)
+                    self.assertIn("Ratchet unavailable: <pre>", summary.read_text())
+                    self.assertIn("agent_readiness_git" if missing_helper else "fetch", summary.read_text())
 
     def test_lfs_smudge_is_skipped_for_base_worktree(self):
         source = self.source()
