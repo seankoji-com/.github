@@ -14,6 +14,12 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  identity-canary:
+    if: github.event_name == 'workflow_dispatch'
+    uses: seankoji-com/.github/.github/workflows/reusable-identity-canary.yml@60fca51bc7a1dc98c98fd9837c03ffc70e542133
+    with:
+      expected-sha: 60fca51bc7a1dc98c98fd9837c03ffc70e542133
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
