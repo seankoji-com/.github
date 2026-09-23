@@ -54,7 +54,9 @@ API = "https://api.github.com"
 GATE_CHECK_NAME = "gatekeeper / all-checks-passed"
 PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
 PERSONA_CHECK_NAME = "persona / grumpy-engineer"
-PERSONA_STATE_RE = re.compile(r"<!-- grumpy-dispatch:(\d+):([0-9a-f]{40}):(waiting|running|failed):([0-9T:+.-]+Z) -->")
+PERSONA_STATE_RE = re.compile(
+    r"^<!-- grumpy-dispatch:(\d+):([0-9a-f]{40}):(waiting|running|failed):([0-9T:+.-]+Z) -->$",
+    re.MULTILINE)
 DISPATCH_ALERT_MINUTES = 10
 REVIEW_ALERT_MINUTES = 120
 
@@ -378,11 +380,12 @@ def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | No
 
 
 def persona_progress(checks: list[dict], prior_runs: list[dict],
-                     signal_state: str = "", signal_pr: int = 0) -> list[str]:
+                     signal_state: str = "", signal_pr: int = 0,
+                     signal_sha: str = "") -> list[str]:
     """Describe exact-head dispatch state carried by previous gate summaries."""
     prior = {}
     for run in prior_runs:
-        if run.get("name") != GATE_CHECK_NAME:
+        if run.get("name") != GATE_CHECK_NAME or (run.get("app") or {}).get("id") != 15368:
             continue
         summary = (run.get("output") or {}).get("summary") or ""
         for number, sha, state, stamp in PERSONA_STATE_RE.findall(summary):
@@ -396,7 +399,7 @@ def persona_progress(checks: list[dict], prior_runs: list[dict],
             continue
         key = (check["number"], check["head_sha"])
         state, stamp = prior.get(key, ("waiting", check.get("updated_at") or ""))
-        if signal_state and signal_pr == check["number"]:
+        if signal_state and signal_pr == check["number"] and signal_sha == check["head_sha"]:
             state, stamp = signal_state, now.strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             since = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
@@ -415,6 +418,7 @@ def persona_progress(checks: list[dict], prior_runs: list[dict],
             message = f"PR #{check['number']}: waiting for review dispatch"
             if age >= DISPATCH_ALERT_MINUTES:
                 message += f"; alert: undispatched for {int(age)} minutes"
+        check["marker"] = persona_marker(check["number"], (check["status"], check["conclusion"]))
         check["dispatch_marker"] = (
             f"<!-- grumpy-dispatch:{check['number']}:{check['head_sha']}:{state}:{stamp} -->")
         descriptions.append(message)
@@ -513,7 +517,7 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
                                 for key in ("head_sha", "merge_sha") if c.get(key))
         refs_complete = True
         runs, statuses, suites = collect(repo, sha, token)
-        progress = persona_progress(persona_checks, runs, persona_state, persona_pr)
+        progress = persona_progress(persona_checks, runs, persona_state, persona_pr, sha)
         runs = runs + persona_checks
         extra_summaries = []
         for ref in sorted(publish_refs - {sha}):

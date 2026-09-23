@@ -16,13 +16,43 @@ WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
 class RecoveryRequestTests(unittest.TestCase):
     def test_caller_uses_only_pr_identity_and_is_advisory(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
+        caller = yaml.safe_load((ROOT / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
+        self.assertEqual(caller["jobs"]["recover-persona"]["secrets"],
+                         {"SEANKOJI_CI_PRIVATE_KEY": "${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}"})
         job = workflow["jobs"]["request"]
         self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["timeout-minutes"], 5)
         self.assertFalse(any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"]))
         self.assertTrue(all(s.get("continue-on-error") for s in job["steps"] if s.get("id")))
+        expected_env = {"TARGET_REPO": "${{ inputs.target_repository }}",
+                        "TARGET_PR": "${{ inputs.pr_number }}",
+                        "TARGET_SHA": "${{ inputs.head_sha }}"}
+        for step_id in ("validate", "dispatch"):
+            step = next(s for s in job["steps"] if s.get("id") == step_id)
+            self.assertEqual({key: step["env"][key] for key in expected_env}, expected_env)
         request = next(s for s in job["steps"] if s.get("id") == "dispatch")
         self.assertIn(".id > $before", request["run"])
         self.assertIn("no workflow run appeared", request["run"])
+
+    def test_validate_rejects_bad_target_before_token_mint(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        script = next(s for s in workflow["jobs"]["request"]["steps"]
+                      if s.get("id") == "validate")["run"]
+        valid = {"TARGET_REPO": "seankoji-com/example", "TARGET_PR": "42",
+                 "TARGET_SHA": "a" * 40}
+        cases = ((valid, 0),
+                 (dict(valid, TARGET_REPO="evil/example"), 1),
+                 (dict(valid, TARGET_PR="42; curl attacker"), 1),
+                 (dict(valid, TARGET_PR="042"), 1),
+                 (dict(valid, TARGET_PR="0"), 1),
+                 (dict(valid, TARGET_SHA="abc"), 1))
+        for env_update, expected_failure in cases:
+            with self.subTest(env_update=env_update):
+                result = subprocess.run(["bash", "-c", script],
+                                        env=dict(os.environ, **env_update),
+                                        stdin=subprocess.DEVNULL, capture_output=True,
+                                        text=True, timeout=10)
+                self.assertEqual(result.returncode != 0, bool(expected_failure), result.stderr)
 
     def test_accepted_without_run_retries_once_and_stays_visible(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
@@ -62,7 +92,8 @@ fi
                            TARGET_REPO="seankoji-com/example", TARGET_PR="42",
                            TARGET_SHA="a" * 40)
                 result = subprocess.run(["bash", "-c", script], env=env,
-                                        capture_output=True, text=True, timeout=10)
+                                        stdin=subprocess.DEVNULL, capture_output=True,
+                                        text=True, timeout=10)
                 self.assertEqual(result.returncode, expected_rc, result.stderr)
                 self.assertEqual(int((temp / "posts").read_text()), expected_posts)
                 if mode == "missing":

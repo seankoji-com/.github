@@ -450,6 +450,8 @@ class TestReviewEventContract(unittest.TestCase):
                     if s["name"] == "Evaluate and post the gate")
         self.assertEqual(step["env"]["SEED"], "${{ inputs.seed }}")
         self.assertIn('if [ "$SEED" = "true" ]; then args+=(--seed); fi', step["run"])
+        self.assertIn('"$PERSONA_STATE" =~ ^(running|failed)$', step["run"])
+        self.assertIn('"$PERSONA_PR" =~ ^[1-9][0-9]{0,11}$', step["run"])
 
 
 class TestSeed(unittest.TestCase):
@@ -566,10 +568,11 @@ class TestPersonaReview(unittest.TestCase):
 
 
     def test_dispatch_wait_running_and_recovered_verdict(self):
-        pr = {"number": 42, "head": {"sha": "head"}, "merge_commit_sha": None,
+        sha = "a" * 40
+        pr = {"number": 42, "head": {"sha": sha}, "merge_commit_sha": None,
               "updated_at": "2026-09-23T00:00:00Z"}
         old = self.review("CHANGES_REQUESTED", sha="old")
-        current = self.review("APPROVED", sha="head", ident=2)
+        current = self.review("APPROVED", sha=sha, ident=2)
         prior = []
         for state, reviews, expected_status, expected_title in (
                 ("", [old], "in_progress", "waiting for review dispatch"),
@@ -580,7 +583,7 @@ class TestPersonaReview(unittest.TestCase):
                  patch.object(pr_gatekeeper, "collect", return_value=(prior, EMPTY_STATUSES, [])), \
                  patch.object(pr_gatekeeper, "_get", side_effect=[[pr], reviews]), \
                  patch.object(pr_gatekeeper, "_post") as post:
-                self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token",
+                self.assertEqual(pr_gatekeeper.report("org/repo", sha, "token",
                                persona_state=state, persona_pr=42 if state else 0), 0)
                 body = post.call_args.args[2]
                 self.assertEqual(body["status"], expected_status)
@@ -593,19 +596,57 @@ class TestPersonaReview(unittest.TestCase):
         progress = pr_gatekeeper.persona_progress([check], [])
         self.assertIn("waiting for review dispatch; alert:", progress[0])
         self.assertEqual(check["status"], "in_progress")
-        progress = pr_gatekeeper.persona_progress([check], [], "failed", 42)
+        progress = pr_gatekeeper.persona_progress([check], [], "failed", 42, "a" * 40)
         self.assertIn("review dispatch or job failed", progress[0])
         self.assertEqual((check["status"], check["conclusion"]), ("completed", "failure"))
+        self.assertEqual(check["marker"], pr_gatekeeper.persona_marker(42, ("completed", "failure")))
 
     def test_running_signal_survives_gate_refresh_only_for_its_head(self):
         sha = "a" * 40
-        prior = {"name": GATE_CHECK_NAME, "output": {"summary":
+        prior = {"name": GATE_CHECK_NAME, "app": {"id": 15368}, "output": {"summary":
                  f"<!-- grumpy-dispatch:42:{sha}:running:2020-01-01T00:00:00Z -->"}}
         check = {"number": 42, "head_sha": sha, "updated_at": "2026-09-23T00:00:00Z",
                  "status": "in_progress", "conclusion": None}
         self.assertIn("review running; alert:", pr_gatekeeper.persona_progress([check], [prior])[0])
         newer = dict(check, head_sha="b" * 40)
         self.assertIn("waiting for review dispatch", pr_gatekeeper.persona_progress([newer], [prior])[0])
+
+    def test_signal_and_prior_state_require_exact_head_and_trusted_run(self):
+        sha = "a" * 40
+        check = {"number": 42, "head_sha": sha, "updated_at": "2026-09-23T00:00:00Z",
+                 "status": "in_progress", "conclusion": None}
+        prior = {"name": GATE_CHECK_NAME, "app": {"id": 1}, "output": {"summary":
+                 f"<!-- grumpy-dispatch:42:{sha}:failed:2099-01-01T00:00:00Z -->"}}
+        self.assertIn("waiting for review dispatch",
+                      pr_gatekeeper.persona_progress([check], [prior])[0])
+        self.assertIn("waiting for review dispatch",
+                      pr_gatekeeper.persona_progress([check], [], "failed", 42, "b" * 40)[0])
+        embedded = dict(prior, app={"id": 15368}, output={"summary":
+                        f"Other check <!-- grumpy-dispatch:42:{sha}:failed:2099-01-01T00:00:00Z -->"})
+        self.assertIn("waiting for review dispatch",
+                      pr_gatekeeper.persona_progress([check], [embedded])[0])
+
+    def test_main_rejects_invalid_persona_signal_pairs(self):
+        base = ["--repo", "org/repo", "--sha", "a" * 40]
+        invalid = (["--seed", "--persona-state", "running", "--persona-pr", "42"],
+                   ["--persona-state", "running"],
+                   ["--persona-pr", "42"],
+                   ["--persona-state", "running", "--persona-pr", "-1"],
+                   ["--review-run", "123", "--persona-state", "running", "--persona-pr", "42"])
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
+             patch.object(pr_gatekeeper, "report") as report_mock, \
+             patch("sys.stderr", new_callable=io.StringIO):
+            for extra in invalid:
+                with self.subTest(extra=extra), self.assertRaises(SystemExit):
+                    pr_gatekeeper.main(base + extra)
+            with self.assertRaises(SystemExit):
+                pr_gatekeeper.main(["--repo", "org/repo", "--reconcile-open",
+                                    "--persona-state", "running", "--persona-pr", "42"])
+            report_mock.assert_not_called()
+            self.assertEqual(pr_gatekeeper.main(base + ["--persona-state", "running",
+                                                      "--persona-pr", "42"]), report_mock.return_value)
+            report_mock.assert_called_once_with("org/repo", "a" * 40, "fake", False,
+                                                persona_state="running", persona_pr=42)
 
 
 class TestReviewEventResolution(unittest.TestCase):

@@ -77,7 +77,8 @@ jobs:
       target_repository: ${{ github.repository }}
       pr_number: ${{ format('{0}', github.event.pull_request.number) }}
       head_sha: ${{ github.event.pull_request.head.sha }}
-    secrets: inherit
+    secrets:
+      SEANKOJI_CI_PRIVATE_KEY: ${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}
 
   review-event:
     # Reviews on forks have read-only tokens. This signal finishes without

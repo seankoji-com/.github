@@ -82,7 +82,7 @@ jobs:
           args=()
           if [ -n "$REVIEW_RUN_ID" ]; then args+=(--review-run "$REVIEW_RUN_ID"); fi
           if [ "$SEED" = "true" ]; then args+=(--seed); fi
-          if [ -n "$PERSONA_STATE" ] && [[ "$PERSONA_PR" =~ ^[0-9]{1,12}$ ]]; then
+          if [[ "$PERSONA_STATE" =~ ^(running|failed)$ ]] && [[ "$PERSONA_PR" =~ ^[1-9][0-9]{0,11}$ ]]; then
             args+=(--persona-state "$PERSONA_STATE" --persona-pr "$PERSONA_PR")
           elif [ -n "$PERSONA_STATE" ] || [ -n "$PERSONA_PR" ]; then
             echo '::error::Invalid persona signal inputs'
