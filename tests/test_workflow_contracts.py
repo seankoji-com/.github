@@ -85,6 +85,49 @@ class NodeWorkflowTests(unittest.TestCase):
 
 
 class SharedWorkflowTests(unittest.TestCase):
+    def test_readiness_stages_companion_at_same_sha_before_running(self):
+        job = workflow("reusable-agent-readiness.yml")["jobs"]["agent-readiness"]
+        checkout, stage, score = job["steps"]
+        self.assertEqual(checkout["with"]["fetch-depth"], 1)
+        self.assertEqual(checkout["with"]["filter"], "blob:none")
+        self.assertFalse(checkout["with"]["persist-credentials"])
+        self.assertFalse(checkout["with"]["lfs"])
+        self.assertEqual(job["env"]["GIT_LFS_SKIP_SMUDGE"], "1")
+        self.assertEqual(score["if"], "steps.stage.outputs.staged == 'true'")
+        self.assertEqual(score["env"]["AGENT_READINESS_GIT_TOKEN"], "${{ github.token }}")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            curl = root / "curl"
+            curl.write_text('''#!/bin/bash
+printf '%s\\n' "$@" >> "$RUNNER_TEMP/fetches"
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = -o ]; then shift; destination="$1"; fi
+  shift
+done
+case "$destination" in
+  *agent_readiness_git.py) [ "$HELPER_AVAILABLE" = true ] || exit 22;;
+esac
+printf '# staged fixture\\n' > "$destination"
+''')
+            curl.chmod(0o755)
+            for enforced, available in ((False, False), (True, False), (True, True)):
+                with self.subTest(enforced=enforced, available=available):
+                    (root / ".agent-readiness.json").write_text(json.dumps({"enforce": enforced}))
+                    (root / "output").write_text("")
+                    (root / "fetches").write_text("")
+                    result = subprocess.run(
+                        ["bash", "-euo", "pipefail", "-c", stage["run"]], cwd=root,
+                        env={**os.environ, "PATH": str(root) + os.pathsep + os.environ["PATH"],
+                             "JOB_WORKFLOW_SHA": "a" * 40, "RUNNER_TEMP": directory,
+                             "HELPER_AVAILABLE": str(available).lower(),
+                             "GITHUB_REPOSITORY": "example/app", "GITHUB_OUTPUT": str(root / "output"),
+                             "GITHUB_STEP_SUMMARY": str(root / "summary")}, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 1 if enforced and not available else 0)
+                    self.assertIn(f"staged={str(available).lower()}", (root / "output").read_text())
+                    fetches = (root / "fetches").read_text()
+                    for filename in ("agent_readiness.py", "agent_readiness_git.py"):
+                        self.assertIn(f"/.github/{'a' * 40}/scripts/{filename}", fetches)
+
     def test_staging_uses_reusable_workflow_sha_and_rejects_missing_identity(self):
         for name in ("reusable-pr-gatekeeper.yml", "reusable-agent-readiness.yml"):
             config = workflow(name)
