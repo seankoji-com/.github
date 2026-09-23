@@ -1,0 +1,33 @@
+name: Reusable identity canary
+
+on:
+  workflow_call:
+    inputs:
+      expected-sha:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify immutable reusable identity and script availability
+        env:
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
+          EXPECTED_SHA: ${{ inputs.expected-sha }}
+          CALLER_SHA: ${{ github.sha }}
+        run: |
+          test "$JOB_WORKFLOW_SHA" = "$EXPECTED_SHA"
+          test "$JOB_WORKFLOW_SHA" != "$CALLER_SHA"
+          printf 'Reusable SHA: %s\nCaller SHA: %s\n' "$JOB_WORKFLOW_SHA" "$CALLER_SHA"
+          for script in agent_readiness.py pr-gatekeeper.py; do
+            curl --fail --silent --show-error --max-time 30 \
+              "https://raw.githubusercontent.com/seankoji-com/.github/$JOB_WORKFLOW_SHA/scripts/$script" \
+              --output "$RUNNER_TEMP/$script"
+            python3 -m py_compile "$RUNNER_TEMP/$script"
+          done
+          echo 'Both scripts fetched and compiled from immutable reusable source.'
