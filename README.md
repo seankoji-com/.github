@@ -29,6 +29,7 @@ wants to run.
 Available reusable workflows include:
 
 - `reusable-node-ci.yml`
+- `reusable-shellspec.yml`
 - `reusable-docker-build-push.yml`
 - `reusable-static-analysis.yml`
 - `reusable-agent-readiness.yml`
@@ -37,6 +38,12 @@ Available reusable workflows include:
 - `reusable-issue-triage.yml`
 - `reusable-link-check.yml`
 - `released.yml`
+
+Node CI accepts `pnpm`, `npm`, or `yarn` and uses the repository's `.nvmrc`
+before its `node-version` fallback. Docker builds keep a separate cache per
+`image-name`; set `cache-scope` when building multiple variants of the same image.
+ShellSpec runs the caller's `.shellspec` configuration with pinned ShellSpec and
+zsh on a GitHub-hosted runner. Callers need only `contents: read` permission.
 
 For example, a deployment workflow can publish the standard release marker:
 
@@ -66,3 +73,11 @@ personal data, or incident logs. Store private operator records in the private
 control-plane archive instead.
 
 Report vulnerabilities using the instructions in [SECURITY.md](SECURITY.md).
+
+## Validation
+
+With Python 3, Node.js, and PyYAML installed, run:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_*.py'
+```

@@ -8,6 +8,9 @@ the deployment-status mechanism do not drift.
 Hermetic: no token, no network, stdlib and PyYAML only.
 """
 
+import json
+import os
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -68,6 +71,40 @@ class ReleasedWorkflowContract(unittest.TestCase):
         for job in jobs.values():
             for step in job.get("steps", []):
                 self.assertNotIn("actions/checkout", step.get("uses", ""))
+
+    def test_inputs_remain_literal_data_when_creating_deployment(self):
+        step = self.workflow["jobs"]["mark-released"]["steps"][0]
+        script = step["with"]["script"]
+        self.assertNotIn("${{", script)
+        for name in ("sha", "environment", "description"):
+            self.assertEqual(step["env"][f"RELEASE_{name.upper()}"],
+                             "${{ inputs." + name + " }}")
+        wrapper = """
+        const calls = [];
+        const context = {repo: {owner: 'example', repo: 'app'}, sha: 'head-sha'};
+        const github = {rest: {repos: {
+          createDeployment: async (args) => {calls.push(args); return {data: {id: 42}};},
+          createDeploymentStatus: async (args) => {calls.push(args);}
+        }}};
+        const core = {info: () => {}, setFailed: (message) => {throw Error(message);}};
+        (async () => {
+        """ + script + "\nconsole.log(JSON.stringify(calls));\n})();"
+        description = "User's release\\n'; throw Error('injected'); //"
+        environment = "preview-'quoted'"
+        for sha, expected in (("  ", "head-sha"), (" abc123 ", "abc123")):
+            with self.subTest(sha=sha):
+                result = subprocess.run(
+                    ["node", "-e", wrapper], check=True, capture_output=True, text=True,
+                    env={**os.environ, "RELEASE_SHA": sha,
+                         "RELEASE_ENVIRONMENT": environment, "RELEASE_DESCRIPTION": description},
+                )
+                deployment, status = json.loads(result.stdout)
+                self.assertEqual(deployment["ref"], expected)
+                for call in (deployment, status):
+                    self.assertEqual(call["description"], description)
+                    self.assertEqual(call["environment"], environment)
+                self.assertEqual(status["deployment_id"], 42)
+                self.assertEqual(status["state"], "success")
 
     def test_documented_in_readme_with_exact_call_syntax(self):
         readme = (ROOT / "README.md").read_text()

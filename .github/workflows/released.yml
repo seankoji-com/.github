@@ -38,14 +38,19 @@ jobs:
   mark-released:
     name: Mark released to ${{ inputs.environment }}
     runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 5
     steps:
       - name: Create deployment and success status
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_ENVIRONMENT: ${{ inputs.environment }}
+          RELEASE_DESCRIPTION: ${{ inputs.description }}
         with:
           script: |
-            const sha = ('${{ inputs.sha }}'.trim()) || context.sha;
-            const environment = '${{ inputs.environment }}';
-            const description = '${{ inputs.description }}';
+            const sha = process.env.RELEASE_SHA.trim() || context.sha;
+            const environment = process.env.RELEASE_ENVIRONMENT;
+            const description = process.env.RELEASE_DESCRIPTION;
 
             const deployment = await github.rest.repos.createDeployment({
               owner: context.repo.owner,

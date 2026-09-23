@@ -23,6 +23,10 @@ on:
         description: 'Additional tags (comma separated)'
         type: string
         default: ''
+      cache-scope:
+        description: 'GHA build cache scope. Defaults to image-name; override for multiple builds of one image.'
+        type: string
+        default: ''
       runner-json:
         description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
         type: string
@@ -75,5 +79,5 @@ jobs:
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ inputs.cache-scope || inputs.image-name }}
+          cache-to: type=gha,mode=max,scope=${{ inputs.cache-scope || inputs.image-name }}

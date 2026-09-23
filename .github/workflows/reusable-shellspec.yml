@@ -1,0 +1,35 @@
+name: Reusable ShellSpec
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ShellSpec
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install zsh
+        run: |
+          if ! command -v zsh >/dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends zsh
+          fi
+      - name: Fetch pinned ShellSpec
+        env:
+          SHELLSPEC_SHA: 90e48c950239f3b8a9fdfa3e869592872c77b981 # 0.28.1
+        run: |
+          curl --fail --silent --show-error --location --retry 3 --max-time 60 \
+            "https://github.com/shellspec/shellspec/archive/${SHELLSPEC_SHA}.tar.gz" \
+            --output "$RUNNER_TEMP/shellspec.tar.gz"
+          mkdir -p "$RUNNER_TEMP/shellspec"
+          tar -xzf "$RUNNER_TEMP/shellspec.tar.gz" --strip-components=1 -C "$RUNNER_TEMP/shellspec"
+      - name: Run ShellSpec
+        run: '"$RUNNER_TEMP/shellspec/shellspec" --format documentation'
