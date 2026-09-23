@@ -57,6 +57,11 @@ jobs:
 
 ## Required persona review
 
+The gate also waits for the latest Actions runs on the evaluated commit,
+including queued workflows that have not created job checks yet. It cannot
+detect a test workflow that was never triggered; keep required test callers
+and their trigger coverage under repository review.
+
 When the Actions variable `PERSONA_REVIEW_REQUIRED` is `true`, the gate also
 requires an approval from Grumpy Engineer on the current PR head. Missing,
 stale, dismissed, and unreadable reviews block merging. Requested changes

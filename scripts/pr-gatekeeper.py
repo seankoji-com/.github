@@ -10,7 +10,7 @@ The decision lives in `evaluate()`, which is pure: it takes the three API
 payloads and returns the check-run fields to post. All I/O is in `main()`, so
 the tests need no network.
 
-Three payloads are read, and each is load-bearing:
+Four payloads are read, and each is load-bearing:
 
   * `/commits/{sha}/check-runs?filter=latest` — the checks themselves. Also
     de-duplicated here by `(app.id, name)`: without that, "Re-run failed jobs"
@@ -23,6 +23,9 @@ Three payloads are read, and each is load-bearing:
     `latest_check_runs_count > 0`. Some app suites (`vercel`, `claude`) sit at
     `queued` with zero runs permanently; requiring every suite to be completed
     would block every PR in the org forever.
+  * `/actions/runs?head_sha={sha}` — workflows can be queued before any jobs
+    exist. Their latest runs must finish too; zero-job external app suites
+    remain ignored. The gatekeeper workflow itself is excluded.
 
 `conclusion` is None unless `status == "completed"`. `in_progress` is a check
 run *status*; supplying any conclusion forces `status: completed`, so
@@ -53,6 +56,7 @@ API = "https://api.github.com"
 GATE_CHECK_NAME = "gatekeeper / all-checks-passed"
 PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
 PERSONA_CHECK_NAME = "persona / grumpy-engineer"
+GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
 # GitHub adds tomorrow pass silently; anything unrecognised must block.
@@ -232,7 +236,40 @@ def _batch(payload: object, key: str) -> list[dict]:
     return batch
 
 
-def _collect_for_ref(repo: str, ref: str, token: str) -> tuple[list, dict, list]:
+def collect_workflow_checks(repo: str, sha: str, token: str) -> list[dict]:
+    """Include registered workflows before they create their first check run."""
+    latest = {}
+    page = 1
+    while True:
+        payload = _get(f"/repos/{repo}/actions/runs?head_sha={urllib.parse.quote(sha, safe='')}&per_page=100&page={page}", token)
+        batch = _batch(payload, "workflow_runs")
+        count = payload.get("total_count")
+        if not isinstance(count, int) or count < 0 or count > 1000:
+            raise ValueError("invalid or truncated workflow run inventory")
+        for run in batch:
+            if not run.get("head_sha"):
+                raise ValueError("workflow run missing head SHA")
+            if run["head_sha"] != sha:
+                continue
+            path = run.get("path")
+            if not isinstance(path, str) or not path or not run.get("workflow_id") or not run.get("id"):
+                raise ValueError("workflow run missing identity")
+            if path.split("@", 1)[0] == GATE_WORKFLOW_PATH:
+                continue
+            key = (run["workflow_id"], run.get("event"), run.get("head_branch"))
+            order = (run["id"], run.get("run_attempt") or 1)
+            if key not in latest or order > latest[key][0]:
+                latest[key] = (order, run)
+        if len(batch) < 100:
+            break
+        page += 1
+    return [{"id": run["id"],
+             "name": f"Workflow {run['path']} ({key[1]}, {key[2]})",
+             "status": run.get("status"), "conclusion": run.get("conclusion")}
+            for key, (_, run) in latest.items()]
+
+
+def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | None = None) -> tuple[list, dict, list]:
     """Fetch the three payloads for a commit SHA or URL-encoded branch ref."""
     runs: list = []
     page = 1
@@ -274,6 +311,7 @@ def _collect_for_ref(repo: str, ref: str, token: str) -> tuple[list, dict, list]
             break
         page += 1
 
+    runs.extend(collect_workflow_checks(repo, workflow_sha or ref, token))
     return runs, statuses, suites
 
 
@@ -310,7 +348,7 @@ def collect(repo: str, sha: str, token: str) -> tuple[list, dict, list]:
     ref = _open_pr_ref(repo, sha, token)
     if ref is None:
         raise missing_ref_error
-    return _collect_for_ref(repo, ref, token)
+    return _collect_for_ref(repo, ref, token, workflow_sha=sha)
 
 
 def persona_verdict(reviews: list[dict], sha: str) -> tuple[str, str | None]:
