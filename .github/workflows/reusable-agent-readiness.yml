@@ -31,19 +31,23 @@ jobs:
     name: agent-readiness
     runs-on: ${{ fromJSON(inputs.runner-json) }}
     timeout-minutes: 10
+    env:
+      GIT_LFS_SKIP_SMUDGE: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history: the checker scores the merge-base with the base
-          # branch, and a shallow clone has no such commit to find.
-          fetch-depth: 0
+          # The checker fetches only this commit's and the base branch's
+          # histories; historical blobs, unrelated branches and tags stay remote.
+          fetch-depth: 1
+          filter: blob:none
+          lfs: false
           persist-credentials: false
 
       - name: Stage the checker
         id: stage
         env:
-          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           # A checker that cannot be staged is fatal ONLY for a repo that
           # opted into enforcement. An advisory repo cannot fix a missing org
@@ -51,31 +55,37 @@ jobs:
           # green skip — the same escape hatch the checker itself honours.
           unavailable() {
             enforce="$(python3 -c 'import json;print(json.load(open(".agent-readiness.json")).get("enforce", False))' 2>/dev/null || echo False)"
+            printf 'staged=false\nreason=%s\n' "$1" >> "$GITHUB_OUTPUT"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '### Agent readiness unavailable\n\nReason: %s\n\nEnforced: %s\n' "$1" "$enforce" >> "$GITHUB_STEP_SUMMARY"
+            fi
             if [ "$enforce" = "True" ]; then
               echo "::error::agent-readiness checker unavailable: $1 (this repo enforces)"; exit 1
             fi
             echo "::warning::agent-readiness checker unavailable: $1 — advisory repo, skipping"
-            echo "staged=false" >> "$GITHUB_OUTPUT"; exit 0
+            exit 0
           }
           # The hub's own caller may use the same-commit relative form. In that
           # case the checkout already contains the checker under test.
           if [ "${GITHUB_REPOSITORY}" = "seankoji-com/.github" ] && [ -f scripts/agent_readiness.py ]; then
-            cp scripts/agent_readiness.py "${RUNNER_TEMP}/agent_readiness.py"
+            for file in agent_readiness.py agent_readiness_git.py; do
+              [ -s "scripts/${file}" ] || unavailable "missing ${file} in hub checkout"
+              cp "scripts/${file}" "${RUNNER_TEMP}/${file}"
+            done
             echo "hub repo: using the checked-out checker"
             echo "staged=true" >> "$GITHUB_OUTPUT"; exit 0
           fi
-          REF="main"
-          if [ -n "${JOB_WORKFLOW_SHA}" ]; then
-            if ! echo "${JOB_WORKFLOW_SHA}" | grep -qE '^[0-9a-f]{40}$'; then
-              unavailable "invalid job_workflow_sha ${JOB_WORKFLOW_SHA}"
-            fi
-            REF="${JOB_WORKFLOW_SHA}"
+          if [[ ! "${JOB_WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            unavailable "missing or invalid job.workflow_sha"
           fi
-          curl -fsS \
-            "https://raw.githubusercontent.com/seankoji-com/.github/${REF}/scripts/agent_readiness.py" \
-            -o "${RUNNER_TEMP}/agent_readiness.py" \
-            || unavailable "fetch at ref ${REF} failed"
-          [ -s "${RUNNER_TEMP}/agent_readiness.py" ] || unavailable "fetched file is empty"
+          REF="${JOB_WORKFLOW_SHA}"
+          for file in agent_readiness.py agent_readiness_git.py; do
+            curl -fsS --connect-timeout 10 --max-time 30 \
+              "https://raw.githubusercontent.com/seankoji-com/.github/${REF}/scripts/${file}" \
+              -o "${RUNNER_TEMP}/${file}" \
+              || unavailable "fetch of ${file} at ref ${REF} failed"
+            [ -s "${RUNNER_TEMP}/${file}" ] || unavailable "fetched ${file} is empty"
+          done
           echo "staged=true" >> "$GITHUB_OUTPUT"
 
       # --ci: merge-base ratchet, step-summary table, and the enforce gate,
@@ -84,5 +94,6 @@ jobs:
         if: steps.stage.outputs.staged == 'true'
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
+          AGENT_READINESS_GIT_TOKEN: ${{ github.token }}
         run: |
           python3 "${RUNNER_TEMP}/agent_readiness.py" --ci --root .

@@ -44,7 +44,16 @@ jobs:
     name: Validate & Test
     runs-on: ${{ fromJSON(inputs.runner-json) }}
     timeout-minutes: 30
+    env:
+      PACKAGE_MANAGER: ${{ inputs.package-manager }}
     steps:
+      - name: Validate package manager
+        run: |
+          case "$PACKAGE_MANAGER" in
+            pnpm|npm|yarn) ;;
+            *) echo "::error::package-manager must be pnpm, npm, or yarn"; exit 1 ;;
+          esac
+
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -91,25 +100,26 @@ jobs:
 
       - name: Lint
         if: inputs.run-lint
-        run: ${{ inputs.package-manager }} run lint
+        run: '"$PACKAGE_MANAGER" run lint'
 
       - name: Type check
         if: inputs.run-typecheck
-        run: ${{ inputs.package-manager }} run typecheck
+        run: '"$PACKAGE_MANAGER" run typecheck'
 
       - name: Prettier check
         if: inputs.run-prettier
         run: |
-          if ${{ inputs.package-manager }} run | grep -q 'prettier:check'; then
-            ${{ inputs.package-manager }} run prettier:check
+          has_prettier="$(node -e 'console.log(Object.prototype.hasOwnProperty.call(require("./package.json").scripts || {}, "prettier:check"))')"
+          if [ "$has_prettier" = "true" ]; then
+            "$PACKAGE_MANAGER" run prettier:check
           else
             echo "No prettier:check script found, skipping."
           fi
 
       - name: Test
         if: inputs.run-test
-        run: ${{ inputs.package-manager }} test
+        run: '"$PACKAGE_MANAGER" test'
 
       - name: Build
         if: inputs.run-build
-        run: ${{ inputs.package-manager }} run build
+        run: '"$PACKAGE_MANAGER" run build'
