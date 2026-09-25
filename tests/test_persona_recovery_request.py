@@ -25,7 +25,7 @@ class RecoveryRequestTests(unittest.TestCase):
         self.assertEqual(recovery["secrets"],
                          {"SEANKOJI_CI_PRIVATE_KEY": "${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}"})
         self.assertTrue(recovery.get("continue-on-error"))
-        self.assertIn("secrets.SEANKOJI_CI_PRIVATE_KEY != ''", recovery["if"])
+        self.assertEqual(recovery["if"], "github.event_name == 'pull_request_target'")
         self.assertEqual(recovery["with"], {
             "target_repository": "${{ github.repository }}",
             "pr_number": "${{ format('{0}', github.event.pull_request.number) }}",
@@ -33,7 +33,7 @@ class RecoveryRequestTests(unittest.TestCase):
         })
         job = workflow["jobs"]["request"]
         self.assertEqual(job["runs-on"], "ubuntu-latest")
-        self.assertEqual(job["timeout-minutes"], 5)
+        self.assertEqual(job["timeout-minutes"], 10)
         self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
         self.assertFalse(any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"]))
         self.assertTrue(all(s.get("continue-on-error") for s in job["steps"] if s.get("id")))

@@ -69,7 +69,7 @@ jobs:
   recover-persona:
     # An independent event path; the reusable sends only PR identity to the
     # private controller and never checks out PR code.
-    if: github.event_name == 'pull_request_target' && secrets.SEANKOJI_CI_PRIVATE_KEY != ''
+    if: github.event_name == 'pull_request_target'
     continue-on-error: true
     permissions:
       contents: read

@@ -21,7 +21,7 @@ on:
 jobs:
   request:
     runs-on: ubuntu-latest # runner-keep-hosted
-    timeout-minutes: 5
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: read
@@ -79,22 +79,27 @@ jobs:
           expected="Persona recovery ${TARGET_REPO}#${TARGET_PR} @ ${TARGET_SHA}"
 
           runs_json=$(gh api "$workflow" 2>/dev/null || echo '{"workflow_runs":[]}')
-          if jq -e --arg title "$expected"                'any(.workflow_runs[]; .display_title == $title and (.status == "queued" or .status == "in_progress"))' <<<"$runs_json" >/dev/null; then
+          if jq -e --arg title "$expected" \
+               'any(.workflow_runs[]; .display_title == $title and (.status == "queued" or .status == "in_progress"))' <<<"$runs_json" >/dev/null; then
             echo "::notice::Active recovery run for this exact head is already in flight; skipping dispatch"
             exit 0
           fi
 
-          before=$(jq '[.workflow_runs[].id] | max // 0' <<<"$runs_json")
-
           for attempt in 1 2; do
             echo "::notice::Recovery delivery attempt $attempt"
-            jq -n --arg repo "$TARGET_REPO" --argjson pr "$TARGET_PR"               --arg sha "$TARGET_SHA"               '{event_type:"persona-review-reconcile-requested",
-                client_payload:{repository:$repo,pull_number:$pr,head_sha:$sha}}'               | gh api -X POST repos/seankoji-com/.github-private/dispatches --input - >/dev/null
+            runs_json=$(gh api "$workflow" 2>/dev/null || echo '{"workflow_runs":[]}')
+            before=$(jq '[.workflow_runs[].id] | max // 0' <<<"$runs_json")
+            jq -n --arg repo "$TARGET_REPO" --argjson pr "$TARGET_PR" \
+              --arg sha "$TARGET_SHA" \
+              '{event_type:"persona-review-reconcile-requested",
+                client_payload:{repository:$repo,pull_number:$pr,head_sha:$sha}}' \
+              | gh api -X POST repos/seankoji-com/.github-private/dispatches --input - >/dev/null
 
             for _ in 1 2 3 4 5 6; do
               sleep 10
               runs_json=$(gh api "$workflow" 2>/dev/null || echo '{"workflow_runs":[]}')
-              if jq -e --arg title "$expected" --argjson before "$before"                    'any(.workflow_runs[]; (.display_title == $title or .id > $before) and (.status == "queued" or .status == "in_progress" or .status == "completed"))' <<<"$runs_json" >/dev/null; then
+              if jq -e --arg title "$expected" --argjson before "$before" \
+                   'any(.workflow_runs[]; .id > $before and .display_title == $title and (.status == "queued" or .status == "in_progress" or .status == "completed"))' <<<"$runs_json" >/dev/null; then
                 exit 0
               fi
             done

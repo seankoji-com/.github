@@ -59,7 +59,7 @@ GATE_APP_ID = 15368  # GitHub Actions app; the only summary we trust for dispatc
 PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
 PERSONA_CHECK_NAME = "persona / grumpy-engineer"
 PERSONA_STATE_RE = re.compile(
-    r"^<!-- grumpy-dispatch:(\d+):([0-9a-f]{40}):(waiting|running|failed):([0-9T:+.-]+Z) -->$",
+    r"^<!-- grumpy-dispatch:(\d+):([0-9a-f]{40}):(waiting|running|failed):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})) -->$",
     re.MULTILINE)
 DISPATCH_ALERT_MINUTES = 10
 REVIEW_ALERT_MINUTES = 120
@@ -462,6 +462,16 @@ def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | No
     return checks
 
 
+def _parse_stamp(stamp: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
 def persona_progress(checks: list[dict], prior_runs: list[dict],
                      signal_state: str = "", signal_pr: int = 0,
                      signal_sha: str = "") -> list[str]:
@@ -470,39 +480,52 @@ def persona_progress(checks: list[dict], prior_runs: list[dict],
     for run in prior_runs:
         if run.get("name") != GATE_CHECK_NAME or (run.get("app") or {}).get("id") != GATE_APP_ID:
             continue
+        run_id = int(run.get("id") or 0)
         summary = (run.get("output") or {}).get("summary") or ""
         for number, sha, state, stamp in PERSONA_STATE_RE.findall(summary):
+            parsed = _parse_stamp(stamp)
+            if parsed is None:
+                continue
             key = (int(number), sha)
-            if key not in prior or stamp > prior[key][1]:
-                prior[key] = (state, stamp)
+            if key not in prior or (parsed, run_id) > (prior[key][2], prior[key][3]):
+                prior[key] = (state, stamp, parsed, run_id)
     now = datetime.now(timezone.utc)
     descriptions = []
     for check in checks:
         if check["status"] == "completed":
             continue
         key = (check["number"], check["head_sha"])
-        state, stamp = prior.get(key, ("waiting", check.get("updated_at") or ""))
+        if key in prior:
+            state, stamp, since, _ = prior[key]
+        else:
+            default_stamp = check.get("updated_at") or ""
+            parsed = _parse_stamp(default_stamp)
+            if parsed is not None:
+                state, stamp, since = "waiting", default_stamp, parsed
+            else:
+                state = "waiting"
+                stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                since = now
+
         if signal_state and signal_pr == check["number"] and signal_sha == check["head_sha"]:
-            state, stamp = signal_state, now.strftime("%Y-%m-%dT%H:%M:%SZ")
-        try:
-            since = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
-            age = max(0, (now - since).total_seconds() / 60)
-        except (ValueError, TypeError):
+            state = signal_state
             stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
-            age = 0
+            since = now
+
+        age = max(0, (now - since).total_seconds() / 60)
         if state == "failed":
             check["status"], check["conclusion"] = "completed", "failure"
-            message = f"PR #{check['number']}: review dispatch or job failed; recovery will retry"
+            message = f"PR #{check["number"]}: review dispatch or job failed; recovery will retry"
         elif state == "running":
-            message = f"PR #{check['number']}: review running"
+            message = f"PR #{check["number"]}: review running"
             if age >= REVIEW_ALERT_MINUTES:
                 message += f"; alert: running for {int(age)} minutes"
         else:
-            message = f"PR #{check['number']}: waiting for review dispatch"
+            message = f"PR #{check["number"]}: waiting for review dispatch"
             if age >= DISPATCH_ALERT_MINUTES:
                 message += f"; alert: undispatched for {int(age)} minutes"
         check["dispatch_marker"] = (
-            f"<!-- grumpy-dispatch:{check['number']}:{check['head_sha']}:{state}:{stamp} -->")
+            f"<!-- grumpy-dispatch:{check["number"]}:{check["head_sha"]}:{state}:{stamp} -->")
         descriptions.append(message)
     return descriptions
 
