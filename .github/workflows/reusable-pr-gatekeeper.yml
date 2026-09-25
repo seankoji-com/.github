@@ -51,16 +51,13 @@ jobs:
     steps:
       - name: Stage the evaluator
         env:
-          JOB_WORKFLOW_SHA: ${{ github.job_workflow_sha }}
+          JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
-          REF="main"
-          if [ -n "${JOB_WORKFLOW_SHA}" ]; then
-            if ! echo "${JOB_WORKFLOW_SHA}" | grep -qE '^[0-9a-f]{40}$'; then
-              echo "::error::Invalid job_workflow_sha format: ${JOB_WORKFLOW_SHA}"
-              exit 1
-            fi
-            REF="${JOB_WORKFLOW_SHA}"
+          if [[ ! "${JOB_WORKFLOW_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Missing or invalid job.workflow_sha"
+            exit 1
           fi
+          REF="${JOB_WORKFLOW_SHA}"
           curl -fsS \
             "https://raw.githubusercontent.com/seankoji-com/.github/${REF}/scripts/pr-gatekeeper.py" \
             -o "${RUNNER_TEMP}/pr-gatekeeper.py" \

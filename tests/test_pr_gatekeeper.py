@@ -251,7 +251,7 @@ class TestRecovery(unittest.TestCase):
     def test_status_pagination_preserves_failure_on_second_page(self):
         first = {"total_count": 101, "statuses": [{"context": str(i), "state": "success"} for i in range(100)]}
         second = {"total_count": 101, "statuses": [{"context": "late", "state": "failure"}]}
-        with patch.object(pr_gatekeeper, "_get", side_effect=[{"check_runs": []}, first, second, {"check_suites": []}]):
+        with patch.object(pr_gatekeeper, "_get", side_effect=[{"check_runs": []}, first, second, {"check_suites": []}, {"workflow_runs": [], "total_count": 0}]):
             runs, statuses, suites = pr_gatekeeper.collect("demo/repo", "abc", "fake")
             self.assertEqual(evaluate(runs, statuses, suites)[1], "failure")
 
@@ -266,10 +266,12 @@ class TestRecovery(unittest.TestCase):
                 {"check_runs": []},
                 EMPTY_STATUSES,
                 {"check_suites": []},
+                {"workflow_runs": [], "total_count": 0},
             ],
         ) as get:
             self.assertEqual(pr_gatekeeper.collect("demo/repo", "abc", "fake"), ([], EMPTY_STATUSES, []))
         self.assertIn("commits/codex%2Ffix%20gate/check-runs", get.call_args_list[2].args[0])
+        self.assertIn("actions/runs?head_sha=abc", get.call_args_list[-1].args[0])
 
     def test_sha_read_raises_when_no_open_pr_matches(self):
         missing = urllib.error.HTTPError("https://api.github.com/test", 422, "missing", {}, None)
@@ -497,11 +499,11 @@ class TestSeed(unittest.TestCase):
         for persona_required in ("true", "false"):
             with self.subTest(persona_required=persona_required):
                 with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": persona_required}), \
-                     patch.object(pr_gatekeeper, "_get") as get_mock, \
+                     patch.object(pr_gatekeeper, "_get", return_value={"check_runs": []}) as get_mock, \
                      patch.object(pr_gatekeeper, "collect") as collect_mock, \
                      patch.object(pr_gatekeeper, "_post") as post_mock:
                     self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", seed=True), 0)
-                    get_mock.assert_not_called()
+                    get_mock.assert_called_once()
                     collect_mock.assert_not_called()
                     self.assertEqual(post_mock.call_count, 1)
                     body = post_mock.call_args.args[2]
@@ -514,12 +516,14 @@ class TestSeed(unittest.TestCase):
                     self.assertIn('<!-- gatekeeper-refs:["abc"] -->', body["output"]["summary"])
 
     def test_seed_dry_run_does_not_post(self):
-        with patch.object(pr_gatekeeper, "_post") as post_mock:
+        with patch.object(pr_gatekeeper, "has_evaluated_gate", return_value=False), \
+             patch.object(pr_gatekeeper, "_post") as post_mock:
             self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", dry_run=True, seed=True), 0)
             post_mock.assert_not_called()
 
     def test_seed_post_failure_returns_error_code(self):
-        with patch.object(pr_gatekeeper, "_post", side_effect=urllib.error.URLError("network error")), \
+        with patch.object(pr_gatekeeper, "has_evaluated_gate", return_value=False), \
+             patch.object(pr_gatekeeper, "_post", side_effect=urllib.error.URLError("network error")), \
              patch("sys.stderr"):
             self.assertEqual(pr_gatekeeper.report("demo/repo", "abc", "fake", seed=True), 2)
 

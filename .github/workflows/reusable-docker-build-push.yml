@@ -23,6 +23,10 @@ on:
         description: 'Additional tags (comma separated)'
         type: string
         default: ''
+      cache-scope:
+        description: 'GHA cache scope; defaults to image-name. Letters, digits, dot, underscore, slash, colon, @ and hyphen only.'
+        type: string
+        default: ''
       runner-json:
         description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
         type: string
@@ -37,7 +41,15 @@ jobs:
     name: Docker Build & Push
     runs-on: ${{ fromJSON(inputs.runner-json) }}
     timeout-minutes: 30
+    env:
+      CACHE_SCOPE: ${{ inputs.cache-scope || inputs.image-name }}
     steps:
+      - name: Validate cache scope
+        run: |
+          if [[ ! "$CACHE_SCOPE" =~ ^[A-Za-z0-9][A-Za-z0-9._/@:-]*$ ]]; then
+            echo '::error::Cache scope must be nonempty and contain only letters, digits, dot, underscore, slash, colon, @ or hyphen.'
+            exit 1
+          fi
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,5 +87,5 @@ jobs:
           push: ${{ inputs.push }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ env.CACHE_SCOPE }}
+          cache-to: type=gha,mode=max,scope=${{ env.CACHE_SCOPE }}

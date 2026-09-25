@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import html
 import json
 import os
 import re
@@ -693,44 +694,43 @@ def run_ci(root: Path, fail_on: str) -> int:
     base_ref = os.environ.get("GITHUB_BASE_REF", "")
     head = audit_repo(root, name)
     reports, ratchet = [head], False
+    unavailable = ""
     if base_ref:
-        # Best-effort fetch: a full-depth checkout already holds origin/<base>,
-        # and the checkout may deliberately carry no credentials — never prompt.
-        subprocess.run(["git", "-C", str(root), "fetch", "--quiet", "origin",
-                        f"+refs/heads/{base_ref}:refs/remotes/origin/{base_ref}"],
-                       timeout=300, capture_output=True,
-                       env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
         try:
-            mb = subprocess.run(["git", "-C", str(root), "merge-base", f"origin/{base_ref}", "HEAD"],
-                                check=True, timeout=60, capture_output=True, text=True).stdout.strip()
+            from agent_readiness_git import prepare_ci_git
+            git = prepare_ci_git(root, base_ref)
+            mb = git("merge-base", f"origin/{base_ref}", "HEAD").stdout.strip()
             renames = {}
-            for line in subprocess.run(["git", "-C", str(root), "diff", "--name-status", "-M", mb, "HEAD"],
-                                       check=True, timeout=60, capture_output=True, text=True).stdout.splitlines():
+            for line in git("diff", "--name-status", "-M", mb, "HEAD").stdout.splitlines():
                 parts = line.split("\t")
                 if parts[0].startswith("R") and len(parts) == 3:
                     renames[parts[2]] = parts[1]  # head path → base path
             with tempfile.TemporaryDirectory(prefix="agent-readiness-base-") as tmp:
                 wt = Path(tmp) / "base"
-                subprocess.run(["git", "-C", str(root), "worktree", "add", "--detach", "--quiet",
-                                str(wt), mb], check=True, timeout=120, capture_output=True)
+                git("worktree", "add", "--detach", "--quiet", str(wt), mb, timeout=120)
                 try:
                     base = audit_repo(wt, name)
                 finally:
-                    subprocess.run(["git", "-C", str(root), "worktree", "remove", "--force", str(wt)],
-                                   timeout=60, capture_output=True)
+                    git("worktree", "remove", "--force", str(wt))
             if base.blocked:
-                print(f"::warning::base scan blocked ({base.findings[0].message})", file=sys.stderr)
+                unavailable = f"base scan blocked ({base.findings[0].message})"
+                print(f"::warning::{unavailable}", file=sys.stderr)
             else:
                 reports, ratchet = apply_baseline([head], to_json([base]), renames), True
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        except (ImportError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            unavailable = str(exc)
             print(f"::warning::could not score merge-base with {base_ref} ({exc})", file=sys.stderr)
     print(render_human(reports, ratchet), file=sys.stderr)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as fh:
             fh.write(render_markdown(reports, ratchet))
+            if base_ref and not ratchet:
+                fh.write("\nRatchet unavailable: <pre>" + html.escape(unavailable[:1000]) + "</pre>\n")
     if base_ref and not ratchet:
-        # No ratchet means no way to tell old debt from new: report, never gate.
+        if head.enforce:
+            print("::error::exact merge-base unavailable in a repo with \"enforce\": true", file=sys.stderr)
+            return 2
         print("::warning::no merge-base to ratchet against; absolute findings are advisory", file=sys.stderr)
         return 0
     rc = exit_code(reports, fail_on, gate=True)

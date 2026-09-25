@@ -10,7 +10,7 @@ The decision lives in `evaluate()`, which is pure: it takes the three API
 payloads and returns the check-run fields to post. All I/O is in `main()`, so
 the tests need no network.
 
-Three payloads are read, and each is load-bearing:
+Four payloads are read, and each is load-bearing:
 
   * `/commits/{sha}/check-runs?filter=latest` — the checks themselves. Also
     de-duplicated here by `(app.id, name)`: without that, "Re-run failed jobs"
@@ -23,6 +23,9 @@ Three payloads are read, and each is load-bearing:
     `latest_check_runs_count > 0`. Some app suites (`vercel`, `claude`) sit at
     `queued` with zero runs permanently; requiring every suite to be completed
     would block every PR in the org forever.
+  * `/actions/runs?head_sha={sha}` — workflows can be queued before any jobs
+    exist. Their latest runs must finish too; zero-job external app suites
+    remain ignored. The gatekeeper workflow itself is excluded.
 
 `conclusion` is None unless `status == "completed"`. `in_progress` is a check
 run *status*; supplying any conclusion forces `status: completed`, so
@@ -60,6 +63,8 @@ PERSONA_STATE_RE = re.compile(
     re.MULTILINE)
 DISPATCH_ALERT_MINUTES = 10
 REVIEW_ALERT_MINUTES = 120
+GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
+EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->" 
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
 # GitHub adds tomorrow pass silently; anything unrecognised must block.
@@ -239,7 +244,78 @@ def _batch(payload: object, key: str) -> list[dict]:
     return batch
 
 
-def _collect_for_ref(repo: str, ref: str, token: str) -> tuple[list, dict, list]:
+class WorkflowInventoryDrift(ValueError):
+    """A paginated run inventory changed or was incomplete during the read."""
+
+
+def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int]]:
+    for attempt in range(3):
+        try:
+            return _collect_workflow_checks(repo, sha, token)
+        except WorkflowInventoryDrift:
+            if attempt == 2:
+                raise
+            time.sleep(1)
+
+
+def _collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int]]:
+    """Include registered workflows before they create their first check run."""
+    latest = {}
+    known_suites = set()
+    seen_runs = set()
+    expected_count = None
+    page = 1
+    while True:
+        payload = _get(f"/repos/{repo}/actions/runs?head_sha={urllib.parse.quote(sha, safe='')}&per_page=100&page={page}", token)
+        batch = _batch(payload, "workflow_runs")
+        count = payload.get("total_count")
+        if not isinstance(count, int) or count < 0 or count > 1000:
+            raise ValueError("invalid or truncated workflow run inventory")
+        if expected_count is not None and count != expected_count:
+            raise WorkflowInventoryDrift("workflow run inventory changed during pagination; retry")
+        expected_count = count
+        for run in batch:
+            if not run.get("id"):
+                raise ValueError("missing workflow run identity")
+            if run["id"] in seen_runs:
+                raise WorkflowInventoryDrift("duplicate workflow run identity; retry")
+            seen_runs.add(run["id"])
+            if not run.get("head_sha"):
+                raise ValueError("workflow run missing head SHA")
+            if run["head_sha"] != sha:
+                continue
+            path = run.get("path")
+            if not isinstance(path, str) or not path or not run.get("workflow_id") or not run.get("id"):
+                raise ValueError("workflow run missing identity")
+            if (str(run["id"]) == os.environ.get("GITHUB_RUN_ID")
+                    or path.split("@", 1)[0] == GATE_WORKFLOW_PATH):
+                continue
+            if isinstance(run.get("check_suite_id"), int):
+                known_suites.add(run["check_suite_id"])
+            key = (run["workflow_id"], run.get("event"), run.get("head_branch"))
+            order = (run["id"], run.get("run_attempt") or 1)
+            if key not in latest or order > latest[key][0]:
+                latest[key] = (order, run)
+        if len(batch) < 100:
+            if len(seen_runs) != expected_count:
+                raise WorkflowInventoryDrift("incomplete workflow run inventory; retry")
+            break
+        page += 1
+    selected_suites = {run.get("check_suite_id") for _, run in latest.values()}
+    def label(value):
+        # Inline code keeps fork-controlled paths/branches from becoming links.
+        return "`" + " ".join(str(value).split()).replace("`", "'")[:100] + "`"
+
+    checks = [{"id": run["id"],
+             "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); "
+                      f"[run {run['id']}](https://github.com/{repo}/actions/runs/{run['id']}). "
+                      "Resolve pending execution/approval or rerun unsuccessful runs"),
+             "status": run.get("status"), "conclusion": run.get("conclusion")}
+            for key, (_, run) in latest.items()]
+    return checks, known_suites - selected_suites
+
+
+def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | None = None) -> tuple[list, dict, list]:
     """Fetch the three payloads for a commit SHA or URL-encoded branch ref."""
     runs: list = []
     page = 1
@@ -281,6 +357,12 @@ def _collect_for_ref(repo: str, ref: str, token: str) -> tuple[list, dict, list]
             break
         page += 1
 
+    workflow_checks, superseded_suites = collect_workflow_checks(repo, workflow_sha or ref, token)
+    # A new workflow run on the same SHA can replace a canceled older suite.
+    # Keep suites from distinct workflows, even when their job names match.
+    runs = [run for run in runs if (run.get("check_suite") or {}).get("id") not in superseded_suites]
+    suites = [suite for suite in suites if suite.get("id") not in superseded_suites]
+    runs.extend(workflow_checks)
     return runs, statuses, suites
 
 
@@ -317,7 +399,7 @@ def collect(repo: str, sha: str, token: str) -> tuple[list, dict, list]:
     ref = _open_pr_ref(repo, sha, token)
     if ref is None:
         raise missing_ref_error
-    return _collect_for_ref(repo, ref, token)
+    return _collect_for_ref(repo, ref, token, workflow_sha=sha)
 
 
 def persona_verdict(reviews: list[dict], sha: str) -> tuple[str, str | None]:
@@ -454,7 +536,7 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
         for check in batch:
             if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != GATE_APP_ID:
                 continue
-            summary = (check.get("output") or {}).get("summary", "")
+            summary = (check.get("output") or {}).get("summary") or ""
             if "<!-- gatekeeper-refs-complete -->" not in summary:
                 continue
             match = re.search(r"<!-- gatekeeper-refs:(\[.*?\]) -->", summary)
@@ -469,9 +551,47 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
         page += 1
 
 
+def has_evaluated_gate(repo: str, sha: str, token: str) -> bool:
+    """A delayed seed must refresh an evaluated gate, not erase its verdict."""
+    page = 1
+    ref = sha
+    while True:
+        try:
+            payload = _get(f"/repos/{repo}/commits/{ref}/check-runs?filter=all&per_page=100&page={page}", token)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (404, 422) or ref != sha:
+                raise
+            alternate = _open_pr_ref(repo, sha, token)
+            if alternate is None or alternate == sha:
+                raise
+            ref, page = alternate, 1
+            continue
+        batch = _batch(payload, "check_runs")
+        for check in batch:
+            if ref != sha and check.get("head_sha") != sha:
+                continue
+            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != GATE_APP_ID:
+                continue
+            output = check.get("output") or {}
+            summary = output.get("summary") or ""
+            title = output.get("title") or ""
+            if (EVALUATED_MARKER in summary or
+                    ("<!-- gatekeeper-refs-complete -->" in summary and title
+                     and title != "Gate seeded, awaiting CI")):
+                return True
+        if len(batch) < 100:
+            return False
+        page += 1
+
+
 def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None,
            seed: bool = False, persona_state: str = "", persona_pr: int = 0) -> int:
     if seed:
+        try:
+            if has_evaluated_gate(repo, sha, token):
+                return report(repo, sha, token, dry_run=dry_run)
+        except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            return report(repo, sha, token, dry_run=dry_run, error=str(exc))
         title = "Gate seeded, awaiting CI"
         summary = (
             "Gate seeded on PR event. Awaiting workflow runs.\n\n"
@@ -554,9 +674,23 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         summary = f"Gate evaluation failed: {type(exc).__name__}. See the gatekeeper job log and retry."
         path = getattr(exc, "request_path", "unknown endpoint")
         print(f"::error::{title} at {path}: {exc}", file=sys.stderr)
-    summary += "\n\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
+    footer = "\n\n" + EVALUATED_MARKER
+    footer += "\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
     if refs_complete:
-        summary += "\n<!-- gatekeeper-refs-complete -->"
+        footer += "\n<!-- gatekeeper-refs-complete -->"
+    budget = 60000 - len(footer.encode("utf-8"))
+    if budget < 0:
+        status, conclusion, title, result = "completed", "failure", "Too many gate destinations", 2
+        summary = "Gate destination metadata exceeds GitHub's output limit; operator review required."
+        # A delayed seed must still re-evaluate this failure. Do not claim the
+        # omitted destination inventory is complete.
+        summary += "\n\n" + EVALUATED_MARKER
+    else:
+        if len(summary.encode("utf-8")) > budget:
+            notice = "\n\nAdditional details omitted; inspect the repository Actions runs."
+            summary = summary.encode("utf-8")[:max(0, budget - len(notice))].decode("utf-8", errors="ignore") + notice
+            summary = summary.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        summary += footer
     print(f"{status} / {conclusion or '-'}: {title}")
     if dry_run:
         return 0

@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,8 +25,4 @@ jobs:
       - name: Install test dependency
         run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
       - name: Run tests
-        run: |
-          python3 tests/test_agent_readiness.py
-          python3 tests/test_pr_gatekeeper.py
-          python3 tests/test_persona_recovery_request.py
-          python3 tests/test_released_workflow.py
+        run: python3 -m unittest discover -s tests -p 'test_*.py'

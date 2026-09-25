@@ -4,7 +4,7 @@
 change. Not to the size of the repo, the size of the always-loaded guide, or how many
 stale paths an agent has to trip over first.
 
-**Enforced by:** `scripts/agent_readiness.py` — stdlib, no network, runs on any checkout.
+**Enforced by:** `scripts/agent_readiness.py` — stdlib; local scans run offline on any checkout.
 Per PR as `Agent Readiness` (a ratchet: only what the PR made worse), weekly as the
 `Agent readiness fleet report` issue (the absolute picture). Every repo starts advisory
 and opts into gating by itself.
@@ -14,6 +14,15 @@ python3 scripts/agent_readiness.py --root ~/repos/zooma          # one repo
 python3 scripts/agent_readiness.py --fleet ~/repos --json         # everything under a dir
 python3 scripts/agent_readiness.py --root . --baseline base.json  # what changed vs a prior --json run
 ```
+
+PR mode (`--ci`) also needs `scripts/agent_readiness_git.py`. The reusable
+workflow stages both files from its immutable workflow commit. It checks out
+the event commit, including GitHub's synthetic PR merge, then fetches only that
+commit's and the base branch's complete histories with `blob:none`. Other
+branches, tags and LFS objects are not fetched. A detached worktree supplies the
+exact merge-base files for rename-aware comparison; Git credentials exist only
+in the subprocess environment. If history or either script is unavailable,
+enforced repositories fail; advisory repositories report the missing check.
 
 ## The standard
 
