@@ -40,6 +40,7 @@ Reads the token from $GITHUB_TOKEN.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
 import os
 import re
@@ -54,10 +55,16 @@ API = "https://api.github.com"
 # The check-run name, verbatim. The org ruleset matches this string exactly;
 # any variation here is an unsatisfiable required context on 33 repos.
 GATE_CHECK_NAME = "gatekeeper / all-checks-passed"
+GATE_APP_ID = 15368  # GitHub Actions app; the only summary we trust for dispatch state
 PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
 PERSONA_CHECK_NAME = "persona / grumpy-engineer"
+PERSONA_STATE_RE = re.compile(
+    r"^<!-- grumpy-dispatch:(\d+):([0-9a-f]{40}):(waiting|running|failed):(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})) -->$",
+    re.MULTILINE)
+DISPATCH_ALERT_MINUTES = 10
+REVIEW_ALERT_MINUTES = 120
 GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
-EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->"
+EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->" 
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
 # GitHub adds tomorrow pass silently; anything unrecognised must block.
@@ -448,10 +455,79 @@ def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | No
         reviews = _list_all(f"/repos/{repo}/pulls/{pr['number']}/reviews", token)
         status, conclusion = persona_verdict(reviews, pr["head"]["sha"])
         checks.append({"name": f"{PERSONA_CHECK_NAME} (PR #{pr['number']})",
+                       "number": pr["number"], "updated_at": pr.get("updated_at"),
                        "status": status, "conclusion": conclusion,
                        "marker": persona_marker(pr['number'], (status, conclusion)),
                        "head_sha": pr["head"]["sha"], "merge_sha": pr.get("merge_commit_sha")})
     return checks
+
+
+def _parse_stamp(stamp: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
+def persona_progress(checks: list[dict], prior_runs: list[dict],
+                     signal_state: str = "", signal_pr: int = 0,
+                     signal_sha: str = "") -> list[str]:
+    """Describe exact-head dispatch state carried by previous gate summaries."""
+    prior = {}
+    for run in prior_runs:
+        if run.get("name") != GATE_CHECK_NAME or (run.get("app") or {}).get("id") != GATE_APP_ID:
+            continue
+        run_id = int(run.get("id") or 0)
+        summary = (run.get("output") or {}).get("summary") or ""
+        for number, sha, state, stamp in PERSONA_STATE_RE.findall(summary):
+            parsed = _parse_stamp(stamp)
+            if parsed is None:
+                continue
+            key = (int(number), sha)
+            if key not in prior or (parsed, run_id) > (prior[key][2], prior[key][3]):
+                prior[key] = (state, stamp, parsed, run_id)
+    now = datetime.now(timezone.utc)
+    descriptions = []
+    for check in checks:
+        if check["status"] == "completed":
+            continue
+        key = (check["number"], check["head_sha"])
+        if key in prior:
+            state, stamp, since, _ = prior[key]
+        else:
+            default_stamp = check.get("updated_at") or ""
+            parsed = _parse_stamp(default_stamp)
+            if parsed is not None:
+                state, stamp, since = "waiting", default_stamp, parsed
+            else:
+                state = "waiting"
+                stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+                since = now
+
+        if signal_state and signal_pr == check["number"] and signal_sha == check["head_sha"]:
+            state = signal_state
+            stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+            since = now
+
+        age = max(0, (now - since).total_seconds() / 60)
+        if state == "failed":
+            check["status"], check["conclusion"] = "completed", "failure"
+            message = f"PR #{check["number"]}: review dispatch or job failed; recovery will retry"
+        elif state == "running":
+            message = f"PR #{check["number"]}: review running"
+            if age >= REVIEW_ALERT_MINUTES:
+                message += f"; alert: running for {int(age)} minutes"
+        else:
+            message = f"PR #{check["number"]}: waiting for review dispatch"
+            if age >= DISPATCH_ALERT_MINUTES:
+                message += f"; alert: undispatched for {int(age)} minutes"
+        check["dispatch_marker"] = (
+            f"<!-- grumpy-dispatch:{check["number"]}:{check["head_sha"]}:{state}:{stamp} -->")
+        descriptions.append(message)
+    return descriptions
 
 
 def resolve_review_heads(repo: str, run_id: int, token: str) -> list[str]:
@@ -481,7 +557,7 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
         payload = _get(f"/repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100&page={page}", token)
         batch = _batch(payload, "check_runs")
         for check in batch:
-            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != 15368:
+            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != GATE_APP_ID:
                 continue
             summary = (check.get("output") or {}).get("summary") or ""
             if "<!-- gatekeeper-refs-complete -->" not in summary:
@@ -517,7 +593,7 @@ def has_evaluated_gate(repo: str, sha: str, token: str) -> bool:
         for check in batch:
             if ref != sha and check.get("head_sha") != sha:
                 continue
-            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != 15368:
+            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != GATE_APP_ID:
                 continue
             output = check.get("output") or {}
             summary = output.get("summary") or ""
@@ -531,7 +607,8 @@ def has_evaluated_gate(repo: str, sha: str, token: str) -> bool:
         page += 1
 
 
-def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None, seed: bool = False) -> int:
+def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None,
+           seed: bool = False, persona_state: str = "", persona_pr: int = 0) -> int:
     if seed:
         try:
             if has_evaluated_gate(repo, sha, token):
@@ -583,6 +660,7 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
                                 for key in ("head_sha", "merge_sha") if c.get(key))
         refs_complete = True
         runs, statuses, suites = collect(repo, sha, token)
+        progress = persona_progress(persona_checks, runs, persona_state, persona_pr, sha)
         runs = runs + persona_checks
         extra_summaries = []
         for ref in sorted(publish_refs - {sha}):
@@ -596,6 +674,13 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         if persona_checks:
             summary += "\n\nGrumpy Engineer review of the current PR head is required.\n"
             summary += "\n".join(c["marker"] for c in persona_checks)
+            if progress:
+                summary += "\n\n" + "\n".join(progress)
+                summary += "\n" + "\n".join(c["dispatch_marker"] for c in persona_checks if c.get("dispatch_marker"))
+                if status == "in_progress" and len(progress) == 1:
+                    title = progress[0]
+                if any("alert:" in item for item in progress):
+                    print("::warning::" + "; ".join(item for item in progress if "alert:" in item))
     except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
         # Recover independently of the failed PR-list/review-run request.
         # Every published verdict records its destinations for this purpose.
@@ -654,17 +739,25 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--review-run", type=int, help="resolve the current PR head from a review signal run")
     parser.add_argument("--dry-run", action="store_true", help="evaluate without posting")
     parser.add_argument("--seed", action="store_true", help="post an in-progress seed check and exit without evaluating")
+    parser.add_argument("--persona-state", choices=("running", "failed"), default="")
+    parser.add_argument("--persona-pr", type=int, default=0)
     args = parser.parse_args(argv)
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         print("::error::GITHUB_TOKEN is not set", file=sys.stderr)
         return 2
     if args.seed:
+        if args.persona_state or args.persona_pr:
+            parser.error("--seed cannot be used with persona signal inputs")
         if args.review_run:
             parser.error("--seed cannot be used with --review-run")
         if args.reconcile_open:
             parser.error("--seed cannot be used with --reconcile-open")
         return report(args.repo, args.sha, token, args.dry_run, seed=True)
+    if bool(args.persona_state) != bool(args.persona_pr) or args.persona_pr < 0:
+        parser.error("--persona-state and --persona-pr must be provided together")
+    if args.persona_state and (args.reconcile_open or args.review_run):
+        parser.error("persona signal inputs require a single --sha target")
     if args.review_run:
         if not args.sha:
             parser.error("--review-run requires --sha as its blocking fallback")
@@ -674,7 +767,8 @@ def main(argv: list[str]) -> int:
             return report(args.repo, args.sha, token, args.dry_run, error=str(exc))
         return max(report(args.repo, head, token, args.dry_run) for head in heads)
     if not args.reconcile_open:
-        return report(args.repo, args.sha, token, args.dry_run)
+        return report(args.repo, args.sha, token, args.dry_run,
+                      persona_state=args.persona_state, persona_pr=args.persona_pr)
     page, result = 1, 0
     try:
         while True:

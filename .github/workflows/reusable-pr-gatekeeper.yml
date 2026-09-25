@@ -30,6 +30,14 @@ on:
         description: 'Post an in-progress seed check and exit without evaluating.'
         type: boolean
         default: false
+      persona_state:
+        description: 'Private controller signal for the Grumpy review job.'
+        type: string
+        default: ''
+      persona_pr:
+        description: 'PR number for the exact-head persona signal.'
+        type: string
+        default: ''
 
 # Inherit the caller's explicit token permissions. Requiring a new scope here
 # before fleet callers receive it would make older callers fail to resolve.
@@ -59,16 +67,38 @@ jobs:
           }
 
       - name: Evaluate and post the gate
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PERSONA_REVIEW_REQUIRED: ${{ vars.PERSONA_REVIEW_REQUIRED }}
           REVIEW_RUN_ID: ${{ inputs.review_run_id }}
           HEAD_SHA: ${{ inputs.head_sha }}
           SEED: ${{ inputs.seed }}
+          PERSONA_STATE: ${{ inputs.persona_state }}
+          PERSONA_PR: ${{ inputs.persona_pr }}
         run: |
+          # review_run_id is caller-supplied public API and --review-run is
+          # type=int: any non-integer would kill the step on argparse's usage
+          # error before the gate script runs, posting no check run at all.
+          # Guard the shape (as JOB_WORKFLOW_SHA does above) and fall back to
+          # plain --sha evaluation so a bad value cannot suppress the check.
           args=()
-          if [ -n "$REVIEW_RUN_ID" ]; then args+=(--review-run "$REVIEW_RUN_ID"); fi
+          if [ -n "$REVIEW_RUN_ID" ]; then
+            # Match the whole string, not one line of it: a multiline value
+            # such as $'123\ninvalid' would satisfy a per-line grep and still
+            # reach argparse. Cap the length too; run ids are ~10 digits.
+            if [[ "$REVIEW_RUN_ID" =~ ^[0-9]{1,20}$ ]]; then
+              args+=(--review-run "$REVIEW_RUN_ID")
+            else
+              echo "::warning::Ignoring invalid review_run_id '${REVIEW_RUN_ID}'; evaluating by --sha"
+            fi
+          fi
           if [ "$SEED" = "true" ]; then args+=(--seed); fi
+          if [[ "$PERSONA_STATE" =~ ^(running|failed)$ ]] && [[ "$PERSONA_PR" =~ ^[1-9][0-9]{0,11}$ ]]; then
+            args+=(--persona-state "$PERSONA_STATE" --persona-pr "$PERSONA_PR")
+          elif [ -n "$PERSONA_STATE" ] || [ -n "$PERSONA_PR" ]; then
+            echo '::warning::Invalid persona signal inputs; continuing without persona signal'
+          fi
           python3 "${RUNNER_TEMP}/pr-gatekeeper.py" \
             --repo "${GITHUB_REPOSITORY}" \
             --sha "${HEAD_SHA}" "${args[@]}"
