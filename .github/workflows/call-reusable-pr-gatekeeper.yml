@@ -69,10 +69,11 @@ jobs:
   recover-persona:
     # An independent event path; the reusable sends only PR identity to the
     # private controller and never checks out PR code.
-    if: github.event_name == 'pull_request_target'
+    if: github.event_name == 'pull_request_target' && secrets.SEANKOJI_CI_PRIVATE_KEY != ''
+    continue-on-error: true
     permissions:
       contents: read
-    uses: seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@3c049bebd1bdcc683d36639ff40b767146ef0bb1
+    uses: seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@main
     with:
       target_repository: ${{ github.repository }}
       pr_number: ${{ format('{0}', github.event.pull_request.number) }}

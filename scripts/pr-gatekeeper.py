@@ -52,6 +52,7 @@ API = "https://api.github.com"
 # The check-run name, verbatim. The org ruleset matches this string exactly;
 # any variation here is an unsatisfiable required context on 33 repos.
 GATE_CHECK_NAME = "gatekeeper / all-checks-passed"
+GATE_APP_ID = 15368  # GitHub Actions app; the only summary we trust for dispatch state
 PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
 PERSONA_CHECK_NAME = "persona / grumpy-engineer"
 PERSONA_STATE_RE = re.compile(
@@ -385,7 +386,7 @@ def persona_progress(checks: list[dict], prior_runs: list[dict],
     """Describe exact-head dispatch state carried by previous gate summaries."""
     prior = {}
     for run in prior_runs:
-        if run.get("name") != GATE_CHECK_NAME or (run.get("app") or {}).get("id") != 15368:
+        if run.get("name") != GATE_CHECK_NAME or (run.get("app") or {}).get("id") != GATE_APP_ID:
             continue
         summary = (run.get("output") or {}).get("summary") or ""
         for number, sha, state, stamp in PERSONA_STATE_RE.findall(summary):
@@ -418,7 +419,6 @@ def persona_progress(checks: list[dict], prior_runs: list[dict],
             message = f"PR #{check['number']}: waiting for review dispatch"
             if age >= DISPATCH_ALERT_MINUTES:
                 message += f"; alert: undispatched for {int(age)} minutes"
-        check["marker"] = persona_marker(check["number"], (check["status"], check["conclusion"]))
         check["dispatch_marker"] = (
             f"<!-- grumpy-dispatch:{check['number']}:{check['head_sha']}:{state}:{stamp} -->")
         descriptions.append(message)
@@ -452,7 +452,7 @@ def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
         payload = _get(f"/repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100&page={page}", token)
         batch = _batch(payload, "check_runs")
         for check in batch:
-            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != 15368:
+            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != GATE_APP_ID:
                 continue
             summary = (check.get("output") or {}).get("summary", "")
             if "<!-- gatekeeper-refs-complete -->" not in summary:
@@ -608,8 +608,7 @@ def main(argv: list[str]) -> int:
             heads = resolve_review_heads(args.repo, args.review_run, token)
         except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             return report(args.repo, args.sha, token, args.dry_run, error=str(exc))
-        return max(report(args.repo, head, token, args.dry_run,
-                          persona_state=args.persona_state, persona_pr=args.persona_pr) for head in heads)
+        return max(report(args.repo, head, token, args.dry_run) for head in heads)
     if not args.reconcile_open:
         return report(args.repo, args.sha, token, args.dry_run,
                       persona_state=args.persona_state, persona_pr=args.persona_pr)
