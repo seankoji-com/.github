@@ -1,10 +1,24 @@
 """Queued workflows must block before their jobs have check runs."""
 
+import pathlib
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
 import urllib.error
 
+import yaml
+
 from test_pr_gatekeeper import EMPTY_STATUSES, pr_gatekeeper
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+WORKFLOWS = ROOT / ".github/workflows"
+GATE_CALLER = WORKFLOWS / "call-reusable-pr-gatekeeper.yml"
+# The only keys GitHub accepts on a job that calls a reusable workflow.
+REUSABLE_CALLER_KEYS = {"name", "uses", "with", "secrets", "needs", "if",
+                        "permissions", "strategy", "concurrency"}
+# actionlint predates `concurrency.queue`, which GitHub accepts.
+ACTIONLINT_IGNORES = [r'unexpected key "queue" for "concurrency" section']
 
 
 def workflow(ident=1, **fields):
@@ -274,6 +288,45 @@ class DelayedSeedTests(unittest.TestCase):
              patch.object(pr_gatekeeper, "_post") as post:
             self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token", seed=True), 2)
         self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+
+
+
+class WorkflowSyntaxTests(unittest.TestCase):
+    """Errors GitHub rejects at parse time.
+
+    A parse failure shows the workflow by path, runs zero jobs, and never
+    posts `gatekeeper / all-checks-passed`, so every PR in the org blocks.
+    """
+
+    def workflows(self):
+        for path in sorted(WORKFLOWS.glob("*.y*ml")):
+            yield path, yaml.safe_load(path.read_text())
+
+    def test_reusable_caller_jobs_use_only_allowed_keys(self):
+        for path, workflow in self.workflows():
+            for name, job in (workflow.get("jobs") or {}).items():
+                if "uses" not in job:
+                    continue
+                with self.subTest(workflow=path.name, job=name):
+                    self.assertEqual(set(job) - REUSABLE_CALLER_KEYS, set())
+
+    def test_job_level_if_never_reads_secrets(self):
+        for path, workflow in self.workflows():
+            for name, job in (workflow.get("jobs") or {}).items():
+                with self.subTest(workflow=path.name, job=name):
+                    self.assertNotRegex(str(job.get("if", "")), r"\bsecrets\.")
+
+    def test_gatekeeper_caller_passes_actionlint(self):
+        # CI installs a pinned actionlint; locally it is optional.
+        actionlint = shutil.which("actionlint")
+        if not actionlint:
+            self.skipTest("actionlint not installed")
+        args = [actionlint, "-oneline", "-shellcheck=", "-pyflakes="]
+        for pattern in ACTIONLINT_IGNORES:
+            args += ["-ignore", pattern]
+        result = subprocess.run(args + [str(GATE_CALLER)], cwd=ROOT,
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

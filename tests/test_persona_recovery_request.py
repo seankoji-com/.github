@@ -24,7 +24,10 @@ class RecoveryRequestTests(unittest.TestCase):
                          "seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@main")
         self.assertEqual(recovery["secrets"],
                          {"SEANKOJI_CI_PRIVATE_KEY": "${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}"})
-        self.assertTrue(recovery.get("continue-on-error"))
+        # Both keys are invalid on a reusable-workflow caller job; see
+        # test_gatekeeper_workflows.WorkflowSyntaxTests.
+        self.assertNotIn("continue-on-error", recovery)
+        self.assertNotIn("secrets.", recovery["if"])
         self.assertEqual(recovery["if"], "github.event_name == 'pull_request_target'")
         self.assertEqual(recovery["with"], {
             "target_repository": "${{ github.repository }}",
@@ -37,6 +40,9 @@ class RecoveryRequestTests(unittest.TestCase):
         self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
         self.assertFalse(any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"]))
         self.assertTrue(all(s.get("continue-on-error") for s in job["steps"] if s.get("id")))
+        self.assertEqual(workflow[True]["workflow_call"]["secrets"]["SEANKOJI_CI_PRIVATE_KEY"]["required"], False)
+        validate_step = next(s for s in job["steps"] if s.get("id") == "validate")
+        self.assertEqual(validate_step.get("if"), "steps.credentials.outputs.configured == 'true'")
         token_step = next(s for s in job["steps"] if s.get("id") == "token")
         self.assertEqual(token_step.get("if"), "steps.validate.outcome == 'success'")
         dispatch_step = next(s for s in job["steps"] if s.get("id") == "dispatch")

@@ -15,8 +15,10 @@ on:
         required: true
         type: string
     secrets:
+      # Optional so a repo without the key still parses and runs; the
+      # credentials step below turns the whole job into a no-op instead.
       SEANKOJI_CI_PRIVATE_KEY:
-        required: true
+        required: false
 
 jobs:
   request:
@@ -26,8 +28,22 @@ jobs:
       contents: read
       pull-requests: read
     steps:
+      # Callers cannot test `secrets` in a job-level `if`, so the presence
+      # check lives here.
+      - name: Check recovery credentials
+        id: credentials
+        continue-on-error: true
+        env:
+          HAS_KEY: ${{ secrets.SEANKOJI_CI_PRIVATE_KEY != '' }}
+        run: |
+          if [ "$HAS_KEY" = true ]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo '::notice::SEANKOJI_CI_PRIVATE_KEY is not available here; skipping persona recovery'
+          fi
       - name: Validate target
         id: validate
+        if: steps.credentials.outputs.configured == 'true'
         continue-on-error: true # advisory during rollout
         env:
           TARGET_REPO: ${{ inputs.target_repository }}
@@ -110,5 +126,5 @@ jobs:
           jq -r '.workflow_runs[:5][] | "id=\(.id) status=\(.status) conclusion=\(.conclusion) title=\(.display_title)"' <<<"$runs_json" || true
           exit 1
       - name: Show delivery warning
-        if: always() && (steps.validate.outcome != 'success' || steps.token.outcome != 'success' || steps.dispatch.outcome != 'success')
+        if: always() && steps.credentials.outputs.configured == 'true' && (steps.validate.outcome != 'success' || steps.token.outcome != 'success' || steps.dispatch.outcome != 'success')
         run: echo '::warning::Persona recovery signal failed; the review gate will keep waiting and the scheduled sweep can retry'
