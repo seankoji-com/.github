@@ -64,6 +64,10 @@ PERSONA_STATE_RE = re.compile(
 DISPATCH_ALERT_MINUTES = 10
 REVIEW_ALERT_MINUTES = 120
 GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
+# The caller's advisory persona-recovery job. It shares the gate workflow's
+# check suite, so without this exclusion a slow or failed recovery signal
+# would hold the required gate pending or red.
+RECOVERY_CHECK_NAME = "recover-persona / request"
 EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->" 
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
@@ -248,7 +252,7 @@ class WorkflowInventoryDrift(ValueError):
     """A paginated run inventory changed or was incomplete during the read."""
 
 
-def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int]]:
+def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int], set[int]]:
     for attempt in range(3):
         try:
             return _collect_workflow_checks(repo, sha, token)
@@ -258,10 +262,14 @@ def collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict]
             time.sleep(1)
 
 
-def _collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int]]:
-    """Include registered workflows before they create their first check run."""
+def _collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict], set[int], set[int]]:
+    """Include registered workflows before they create their first check run.
+
+    Returns (workflow checks, superseded suite ids, gate workflow suite ids).
+    """
     latest = {}
     known_suites = set()
+    gate_suites = set()
     seen_runs = set()
     expected_count = None
     page = 1
@@ -289,6 +297,8 @@ def _collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict
                 raise ValueError("workflow run missing identity")
             if (str(run["id"]) == os.environ.get("GITHUB_RUN_ID")
                     or path.split("@", 1)[0] == GATE_WORKFLOW_PATH):
+                if isinstance(run.get("check_suite_id"), int):
+                    gate_suites.add(run["check_suite_id"])
                 continue
             if isinstance(run.get("check_suite_id"), int):
                 known_suites.add(run["check_suite_id"])
@@ -312,7 +322,7 @@ def _collect_workflow_checks(repo: str, sha: str, token: str) -> tuple[list[dict
                       "Resolve pending execution/approval or rerun unsuccessful runs"),
              "status": run.get("status"), "conclusion": run.get("conclusion")}
             for key, (_, run) in latest.items()]
-    return checks, known_suites - selected_suites
+    return checks, known_suites - selected_suites, gate_suites
 
 
 def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | None = None) -> tuple[list, dict, list]:
@@ -357,10 +367,15 @@ def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | Non
             break
         page += 1
 
-    workflow_checks, superseded_suites = collect_workflow_checks(repo, workflow_sha or ref, token)
+    workflow_checks, superseded_suites, gate_suites = collect_workflow_checks(repo, workflow_sha or ref, token)
     # A new workflow run on the same SHA can replace a canceled older suite.
     # Keep suites from distinct workflows, even when their job names match.
     runs = [run for run in runs if (run.get("check_suite") or {}).get("id") not in superseded_suites]
+    # Drop only the recovery job inside the gate workflow's own suites. Matching
+    # the suite as well as the name keeps a same-named job elsewhere blocking.
+    runs = [run for run in runs
+            if not (run.get("name") == RECOVERY_CHECK_NAME
+                    and (run.get("check_suite") or {}).get("id") in gate_suites)]
     suites = [suite for suite in suites if suite.get("id") not in superseded_suites]
     runs.extend(workflow_checks)
     return runs, statuses, suites
