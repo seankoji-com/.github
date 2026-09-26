@@ -22,7 +22,7 @@ class WorkflowInventoryTests(unittest.TestCase):
 
     def verdict(self, runs):
         with patch.object(pr_gatekeeper, "_get", return_value={"workflow_runs": runs, "total_count": len(runs)}):
-            checks, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+            checks, _, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
         return pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2]
 
     def test_zero_job_workflows_wait_for_every_nonterminal_state(self):
@@ -64,7 +64,7 @@ class WorkflowInventoryTests(unittest.TestCase):
         run = workflow(head_branch="`[unsafe](https://invalid.example)`" + "x" * 500,
                        path=".github/workflows/`[unsafe](https://invalid.example).yml")
         with patch.object(pr_gatekeeper, "_get", return_value={"workflow_runs": [run], "total_count": 1}):
-            checks, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+            checks, _, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
         name = checks[0]["name"]
         self.assertLess(len(name), 500)
         self.assertEqual(name.count("`"), 6)
@@ -105,7 +105,7 @@ class WorkflowInventoryTests(unittest.TestCase):
                 {"workflow_runs": first, "total_count": 101},
                 {"workflow_runs": [workflow(ident=101, workflow_id=101, status="queued")], "total_count": 101},
         ]) as get:
-            checks, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+            checks, _, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
         self.assertEqual(len(checks), 101)
         self.assertIn("head_sha=head&per_page=100&page=2", get.call_args.args[0])
         self.assertEqual(pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2], ("in_progress", None))
@@ -138,7 +138,7 @@ class WorkflowInventoryTests(unittest.TestCase):
             with self.subTest(drift=drift), patch.object(pr_gatekeeper, "_get", side_effect=[
                     {"workflow_runs": first, "total_count": 101}, drift,
                     {"workflow_runs": first, "total_count": 101}, final]) as get:
-                checks, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+                checks, _, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
             self.assertEqual(get.call_count, 4)
             self.assertIn("page=1", get.call_args_list[2].args[0])
             self.assertEqual(pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2], ("in_progress", None))
@@ -185,11 +185,34 @@ class WorkflowInventoryTests(unittest.TestCase):
                 self.assertEqual(collected[2], [])
                 self.assertEqual(pr_gatekeeper.evaluate(*collected)[1], "failure" if other_failure else "success")
 
+    def test_persona_recovery_job_never_holds_or_fails_the_gate(self):
+        gate_run = workflow(ident=5, workflow_id=30, check_suite_id=105,
+                            path=pr_gatekeeper.GATE_WORKFLOW_PATH, event="pull_request_target",
+                            status="in_progress", conclusion=None)
+        for state, conclusion in (("completed", "failure"), ("in_progress", None)):
+            with self.subTest(state=state):
+                recovery = {"id": 50, "name": pr_gatekeeper.RECOVERY_CHECK_NAME,
+                            "check_suite": {"id": 105}, "status": state, "conclusion": conclusion}
+                with patch.object(pr_gatekeeper, "_get", side_effect=[
+                        {"check_runs": [recovery]}, EMPTY_STATUSES, {"check_suites": []},
+                        {"workflow_runs": [workflow(check_suite_id=101), gate_run], "total_count": 2}]):
+                    collected = pr_gatekeeper.collect("org/repo", "head", "token")
+                self.assertEqual(pr_gatekeeper.evaluate(*collected)[:2], ("completed", "success"))
+
+    def test_same_named_job_outside_the_gate_workflow_still_blocks(self):
+        impostor = {"id": 50, "name": pr_gatekeeper.RECOVERY_CHECK_NAME,
+                    "check_suite": {"id": 101}, "status": "completed", "conclusion": "failure"}
+        with patch.object(pr_gatekeeper, "_get", side_effect=[
+                {"check_runs": [impostor]}, EMPTY_STATUSES, {"check_suites": []},
+                {"workflow_runs": [workflow(check_suite_id=101)], "total_count": 1}]):
+            collected = pr_gatekeeper.collect("org/repo", "head", "token")
+        self.assertEqual(pr_gatekeeper.evaluate(*collected)[:2], ("completed", "failure"))
+
     def test_suite_still_selected_by_another_run_is_not_superseded(self):
         runs = [workflow(ident=1, check_suite_id=101), workflow(ident=2, check_suite_id=102),
                 workflow(ident=3, workflow_id=20, check_suite_id=101, status="queued")]
         with patch.object(pr_gatekeeper, "_get", return_value={"workflow_runs": runs, "total_count": 3}):
-            _, superseded = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+            _, superseded, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
         self.assertEqual(superseded, set())
 
     def test_workflow_api_failure_posts_blocking_gate(self):

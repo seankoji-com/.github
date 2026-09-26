@@ -24,14 +24,22 @@ class RecoveryRequestTests(unittest.TestCase):
                          "seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@main")
         self.assertEqual(recovery["secrets"],
                          {"SEANKOJI_CI_PRIVATE_KEY": "${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}"})
-        self.assertTrue(recovery.get("continue-on-error"))
+        # GitHub rejects the whole caller file for either construct.
+        self.assertNotIn("continue-on-error", recovery)
+        self.assertNotIn("secrets.", recovery["if"])
         self.assertEqual(recovery["if"], "github.event_name == 'pull_request_target'")
+        self.assertNotIn("needs", caller["jobs"]["gatekeeper"])
         self.assertEqual(recovery["with"], {
             "target_repository": "${{ github.repository }}",
             "pr_number": "${{ format('{0}', github.event.pull_request.number) }}",
             "head_sha": "${{ github.event.pull_request.head.sha }}",
         })
+        self.assertFalse(workflow.get("on", workflow.get(True))["workflow_call"]["secrets"]["SEANKOJI_CI_PRIVATE_KEY"]["required"])
         job = workflow["jobs"]["request"]
+        self.assertTrue(job.get("continue-on-error"))
+        self.assertEqual(job["steps"][0]["id"], "key")
+        validate_step = next(s for s in job["steps"] if s.get("id") == "validate")
+        self.assertEqual(validate_step.get("if"), "steps.key.outputs.present == 'true'")
         self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual(job["timeout-minutes"], 10)
         self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
@@ -50,6 +58,23 @@ class RecoveryRequestTests(unittest.TestCase):
         self.assertEqual(dispatch_step["env"]["GITHUB_TOKEN"], "${{ github.token }}")
         self.assertIn(".id > $before", dispatch_step["run"])
         self.assertIn("no matching workflow run appeared", dispatch_step["run"])
+
+    def test_missing_key_skips_the_signal_without_failing(self):
+        if not shutil.which("bash"):
+            raise unittest.SkipTest("bash required for subprocess test")
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        script = next(s for s in workflow["jobs"]["request"]["steps"]
+                      if s.get("id") == "key")["run"]
+        for has_key in ("true", "false"):
+            with self.subTest(has_key=has_key), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                result = subprocess.run(["bash", "-c", script],
+                                        env=dict(os.environ, HAS_KEY=has_key, GITHUB_OUTPUT=str(output)),
+                                        stdin=subprocess.DEVNULL, capture_output=True,
+                                        text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(output.read_text(), f"present={has_key}\n")
+                self.assertEqual("skipping persona recovery signal" in result.stdout, has_key == "false")
 
     def test_validate_rejects_bad_target_before_token_mint(self):
         if not shutil.which("bash"):

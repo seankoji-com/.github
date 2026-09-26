@@ -15,19 +15,35 @@ on:
         required: true
         type: string
     secrets:
+      # Optional: repositories without the key (and Dependabot runs, which get
+      # no Actions secrets) skip the signal instead of failing to start.
       SEANKOJI_CI_PRIVATE_KEY:
-        required: true
+        required: false
 
 jobs:
   request:
     runs-on: ubuntu-latest # runner-keep-hosted
     timeout-minutes: 10
+    # Advisory end to end: the recovery signal must never fail its caller.
+    continue-on-error: true
     permissions:
       contents: read
       pull-requests: read
     steps:
+      # A secret cannot be tested in a job-level `if:`, so check it here.
+      - name: Check for the controller key
+        id: key
+        continue-on-error: true
+        env:
+          HAS_KEY: ${{ secrets.SEANKOJI_CI_PRIVATE_KEY != '' }}
+        run: |
+          echo "present=${HAS_KEY}" >> "$GITHUB_OUTPUT"
+          if [ "$HAS_KEY" != "true" ]; then
+            echo '::notice::SEANKOJI_CI_PRIVATE_KEY is unavailable here; skipping persona recovery signal'
+          fi
       - name: Validate target
         id: validate
+        if: steps.key.outputs.present == 'true'
         continue-on-error: true # advisory during rollout
         env:
           TARGET_REPO: ${{ inputs.target_repository }}
@@ -110,5 +126,5 @@ jobs:
           jq -r '.workflow_runs[:5][] | "id=\(.id) status=\(.status) conclusion=\(.conclusion) title=\(.display_title)"' <<<"$runs_json" || true
           exit 1
       - name: Show delivery warning
-        if: always() && (steps.validate.outcome != 'success' || steps.token.outcome != 'success' || steps.dispatch.outcome != 'success')
+        if: always() && steps.key.outputs.present == 'true' && (steps.validate.outcome != 'success' || steps.token.outcome != 'success' || steps.dispatch.outcome != 'success')
         run: echo '::warning::Persona recovery signal failed; the review gate will keep waiting and the scheduled sweep can retry'

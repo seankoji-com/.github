@@ -68,9 +68,12 @@ concurrency:
 jobs:
   recover-persona:
     # An independent event path; the reusable sends only PR identity to the
-    # private controller and never checks out PR code.
+    # private controller and never checks out PR code. Advisory: the reusable
+    # tolerates a missing key and every failure, and the gate evaluator ignores
+    # this job's check run. `continue-on-error` is not allowed on a `uses:` job
+    # and `secrets` is not allowed in a job `if:` — either makes GitHub reject
+    # the whole file, which takes the required gate down with it.
     if: github.event_name == 'pull_request_target'
-    continue-on-error: true
     permissions:
       contents: read
     uses: seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@main
