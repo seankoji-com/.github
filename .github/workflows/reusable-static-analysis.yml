@@ -83,7 +83,7 @@ jobs:
           echo "$RUNNER_TEMP/semgrep-venv/bin" >> "$GITHUB_PATH"
 
       - name: Save scanner downloads
-        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
         continue-on-error: true
         timeout-minutes: 1
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -107,6 +107,7 @@ jobs:
       # No bare `set -e`: this is the only step in the job not covered by
       # continue-on-error, so a broken result file must never fail the job.
       - name: Record scan outcome
+        timeout-minutes: 1
         if: always()
         env:
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
@@ -114,7 +115,7 @@ jobs:
           RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
           count=""
-          if [ "$INSTALL_OUTCOME" = success ] && [ "$SCAN_OUTCOME" != skipped ] && [ -f "$RESULT_FILE" ]; then
+          if [ "$INSTALL_OUTCOME" = success ] && { [ "$SCAN_OUTCOME" = success ] || [ "$SCAN_OUTCOME" = failure ]; } && [ -f "$RESULT_FILE" ]; then
             count="$(jq -er '.results | if type == "array" then length else error("invalid results") end' "$RESULT_FILE" 2>/dev/null || true)"
           fi
           {
@@ -129,7 +130,7 @@ jobs:
 
       - name: Upload results artifact
         timeout-minutes: 1
-        if: always() && steps.install.outcome == 'success' && steps.scan.outcome != 'skipped' && steps.python.outputs.result != ''
+        if: always() && steps.install.outcome == 'success' && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') && steps.python.outputs.result != ''
         # Non-gating. An artifact-service failure must not fail the scan job;
         # findings are already in the step summary.
         continue-on-error: true
@@ -194,7 +195,7 @@ jobs:
           echo "$RUNNER_TEMP/zizmor-venv/bin" >> "$GITHUB_PATH"
 
       - name: Save scanner downloads
-        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true'
+        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
         continue-on-error: true
         timeout-minutes: 1
         uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -219,6 +220,7 @@ jobs:
           zizmor --no-online-audits --format json .github/workflows > "$RESULT_FILE"
 
       - name: Record scan outcome
+        timeout-minutes: 1
         if: always()
         env:
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
@@ -226,7 +228,7 @@ jobs:
           RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
           count=""
-          if [ "$INSTALL_OUTCOME" = success ] && [ "$SCAN_OUTCOME" != skipped ] && [ -f "$RESULT_FILE" ]; then
+          if [ "$INSTALL_OUTCOME" = success ] && { [ "$SCAN_OUTCOME" = success ] || [ "$SCAN_OUTCOME" = failure ]; } && [ -f "$RESULT_FILE" ]; then
             count="$(jq -er '. | if type == "array" then length else error("invalid results") end' "$RESULT_FILE" 2>/dev/null || true)"
           fi
           {
@@ -241,7 +243,7 @@ jobs:
 
       - name: Upload results artifact
         timeout-minutes: 1
-        if: always() && steps.install.outcome == 'success' && steps.scan.outcome != 'skipped' && steps.python.outputs.result != ''
+        if: always() && steps.install.outcome == 'success' && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') && steps.python.outputs.result != ''
         # Non-gating. Findings are already in the step summary above.
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

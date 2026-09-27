@@ -1,6 +1,7 @@
 """Exercise the actual reusable-workflow installers without network or host pip."""
 
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -24,24 +25,28 @@ class ScannerInstallerTests(unittest.TestCase):
             binary.mkdir(parents=True)
             log = root / "calls"
             github_path = root / "github-path"
+            scanner_log = root / "scanner-calls"
             python = binary / "python"
             python.write_text(
                 '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n'
                 '[ "$PIP_FAIL" = 0 ] || exit 17\n'
             )
             scanner = binary / tool
-            scanner.write_text('#!/bin/sh\n[ "$SCANNER_FAIL" = 0 ] || exit 19\n')
+            scanner.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SCANNER_LOG"\n[ "$SCANNER_FAIL" = 0 ] || exit 19\n')
             for file in (python, scanner):
                 file.chmod(0o755)
             step = next(s for s in self.jobs[tool]["steps"] if s.get("id") == "install")
             result = subprocess.run(
-                ["bash", "-c", step["run"]],
-                env={**os.environ, "RUNNER_TEMP": directory,
+                [shutil.which("bash"), "-c", step["run"]],
+                env={"PATH": str(binary), "RUNNER_TEMP": directory,
+                     "SCANNER_LOG": str(scanner_log),
                      "GITHUB_PATH": str(github_path), "CALL_LOG": str(log),
                      "PIP_FAIL": str(int(pip_failure)),
                      "SCANNER_FAIL": str(int(scanner_failure))},
                 capture_output=True, text=True, timeout=5,
             )
+            if not pip_failure:
+                self.assertEqual(scanner_log.read_text().splitlines(), ["--version"])
             return result, log.read_text().splitlines(), (
                 github_path.read_text() if github_path.exists() else ""
             )
@@ -95,23 +100,62 @@ class ScannerInstallerTests(unittest.TestCase):
                        if s.get("id") in {"install", "scan"})
             self.assertLessEqual(caps + 3, job["timeout-minutes"])
             cache = next(s for s in job["steps"] if s.get("id") == "cache")
+            install = next(s for s in job["steps"] if s.get("id") == "install")
+            save = next(s for s in job["steps"] if "actions/cache/save@" in s.get("uses", ""))
+            self.assertEqual(install["env"]["PIP_CACHE_DIR"], cache["with"]["path"])
+            self.assertEqual(save["with"]["path"], cache["with"]["path"])
+            self.assertEqual(save["with"]["key"], "${{ steps.cache.outputs.cache-primary-key }}")
+            self.assertEqual(save["if"], "steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''")
             self.assertEqual(cache["with"]["path"], "${{ runner.temp }}/scanner-pip-cache")
             for dimension in ("runner.os", "runner.arch", "steps.python.outputs.version", tool):
                 self.assertIn(dimension, cache["with"]["key"])
 
 
+    def test_prepare_publishes_fresh_results_only_after_working_venv(self):
+        for tool, job in self.jobs.items():
+            prep = next(s for s in job["steps"] if s.get("id") == "python")
+            for fail in (False, True):
+                with self.subTest(tool=tool, venv_failure=fail):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        binary = root / "bin"
+                        binary.mkdir()
+                        python = binary / "python3"
+                        python.write_text('#!/bin/sh\nif [ "$1" = -m ]; then [ "$VENV_FAIL" = 0 ] || exit 17; elif [ "$1" = -c ]; then case "$2" in *version=*) echo version=3.12;; esac; fi\n')
+                        python.chmod(0o755)
+                        (binary / "mktemp").symlink_to(shutil.which("mktemp"))
+                        output = root / "output"
+                        result = subprocess.run([shutil.which("bash"), "-c", prep["run"]],
+                            env={"PATH": str(binary), "RUNNER_TEMP": directory,
+                                 "GITHUB_OUTPUT": str(output), "VENV_FAIL": str(int(fail))},
+                            capture_output=True, text=True, timeout=5)
+                        outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                        self.assertEqual(outputs["version"], "3.12")
+                        if fail:
+                            self.assertNotEqual(result.returncode, 0)
+                            self.assertIn("::warning::", result.stdout)
+                            self.assertNotIn("result", outputs)
+                        else:
+                            self.assertEqual(result.returncode, 0, result.stderr)
+                            path = Path(outputs["result"])
+                            self.assertEqual(path.parent.parent, root)
+                            self.assertTrue(path.parent.is_dir())
+                            self.assertFalse(path.exists())
+
+    @unittest.skipUnless(shutil.which("jq"), "jq is required to execute scanner summaries")
     def test_summary_rejects_stale_workspace_and_malformed_output(self):
         import json
         for tool, job in self.jobs.items():
             summary_step = next(s for s in job["steps"] if s["name"] == "Record scan outcome")
             prep = next(s for s in job["steps"] if s.get("id") == "python")
             self.assertIn('mktemp -d "$RUNNER_TEMP/', prep["run"])
-            self.assertIn("venv/ensurepip", prep["run"])
             artifact = next(s for s in job["steps"] if s["name"] == "Upload results artifact")
             self.assertEqual(artifact["with"]["path"], "${{ steps.python.outputs.result }}")
             self.assertIn("steps.install.outcome == 'success'", artifact["if"])
             for install, scan, output, expected in (
-                ("failure", "skipped", None, "NO-OUTPUT"),
+                ("failure", "success", [{"finding": True}], "NO-OUTPUT"),
+                ("", "", [], "NO-OUTPUT"),
+                ("success", "", [], "NO-OUTPUT"),
                 ("success", "skipped", [], "NO-OUTPUT"),
                 ("success", "failure", "malformed", "NO-OUTPUT"),
                 ("success", "success", {"bad": 1}, "NO-OUTPUT"),
