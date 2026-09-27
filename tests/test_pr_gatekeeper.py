@@ -164,6 +164,19 @@ class TestSelfExclusion(unittest.TestCase):
         )
         self.assertEqual((status, conclusion), ("completed", "success"))
 
+    def test_advisory_recovery_job_never_gates(self):
+        for recovery in (
+            run("recover-persona / request", conclusion="failure", run_id=4),
+            run("recover-persona / request", status="in_progress", conclusion=None, run_id=5),
+        ):
+            with self.subTest(status=recovery["status"]):
+                status, conclusion, _, _ = evaluate([run("real check"), recovery], EMPTY_STATUSES, [])
+                self.assertEqual((status, conclusion), ("completed", "success"))
+
+    def test_advisory_name_from_another_app_still_gates(self):
+        imposter = run("recover-persona / request", conclusion="failure", app_id=999, run_id=6)
+        self.assertEqual(evaluate([run("real check"), imposter], EMPTY_STATUSES, [])[1], "failure")
+
 
 class TestDedupe(unittest.TestCase):
     def test_same_named_workflows_do_not_hide_a_failure(self):
