@@ -45,7 +45,9 @@ jobs:
           set -euo pipefail
           python3 -c 'import sys; assert sys.version_info >= (3, 10), "Scanners require Python >=3.10"'
           python3 -c 'import sys; print("version=" + ".".join(map(str, sys.version_info[:2])))' >> "$GITHUB_OUTPUT"
-          python3 -m venv --clear "$RUNNER_TEMP/semgrep-venv"
+          python3 -m venv --clear "$RUNNER_TEMP/semgrep-venv" || { echo "::warning::Scanner requires working Python venv/ensurepip support on this runner"; exit 1; }
+          result_dir="$(mktemp -d "$RUNNER_TEMP/semgrep-results.XXXXXX")"
+          echo "result=$result_dir/results.json" >> "$GITHUB_OUTPUT"
 
       - name: Restore scanner downloads
         id: cache
@@ -96,44 +98,45 @@ jobs:
         continue-on-error: true
         env:
           SEMGREP_SEND_METRICS: 'off'
+          RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
           set -uo pipefail
           semgrep scan --config p/security-audit --config p/secrets \
-            --metrics=off --json --output semgrep-results.json .
+            --metrics=off --json --output "$RESULT_FILE" .
 
       # No bare `set -e`: this is the only step in the job not covered by
       # continue-on-error, so a broken result file must never fail the job.
       - name: Record scan outcome
         if: always()
+        env:
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
-          if ! jq -e '.results | type == "array"' semgrep-results.json >/dev/null 2>&1; then
-            echo "::warning::Semgrep did not produce valid scan output; inspect install/scan logs."
+          count=""
+          if [ "$INSTALL_OUTCOME" = success ] && [ "$SCAN_OUTCOME" != skipped ] && [ -f "$RESULT_FILE" ]; then
+            count="$(jq -er '.results | if type == "array" then length else error("invalid results") end' "$RESULT_FILE" 2>/dev/null || true)"
           fi
           {
             echo "### Semgrep"
-            if [ -f semgrep-results.json ]; then
-              count="$(jq '.results | length' semgrep-results.json 2>/dev/null || true)"
-              if [ -n "${count:-}" ]; then
-                echo "- SCANNED: ${count} finding(s) (see artifact \`semgrep-results\` for detail)"
-              else
-                echo "- SCANNED: output file present but could not be parsed as JSON"
-              fi
+            if [ -n "$count" ]; then
+              echo "- SCANNED: $count finding(s); scan outcome: $SCAN_OUTCOME"
             else
-              echo "- INSTALL-FAILED or NO-OUTPUT: semgrep-results.json not found — check the install/scan step logs above"
+              echo "- INSTALL-FAILED or NO-OUTPUT: install=$INSTALL_OUTCOME scan=$SCAN_OUTCOME; inspect logs"
             fi
           } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           exit 0
 
       - name: Upload results artifact
         timeout-minutes: 1
-        if: always()
+        if: always() && steps.install.outcome == 'success' && steps.scan.outcome != 'skipped' && steps.python.outputs.result != ''
         # Non-gating. An artifact-service failure must not fail the scan job;
         # findings are already in the step summary.
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: semgrep-results
-          path: semgrep-results.json
+          path: ${{ steps.python.outputs.result }}
           if-no-files-found: ignore
           retention-days: 30
 
@@ -157,7 +160,9 @@ jobs:
           set -euo pipefail
           python3 -c 'import sys; assert sys.version_info >= (3, 10), "Scanners require Python >=3.10"'
           python3 -c 'import sys; print("version=" + ".".join(map(str, sys.version_info[:2])))' >> "$GITHUB_OUTPUT"
-          python3 -m venv --clear "$RUNNER_TEMP/zizmor-venv"
+          python3 -m venv --clear "$RUNNER_TEMP/zizmor-venv" || { echo "::warning::Scanner requires working Python venv/ensurepip support on this runner"; exit 1; }
+          result_dir="$(mktemp -d "$RUNNER_TEMP/zizmor-results.XXXXXX")"
+          echo "result=$result_dir/results.json" >> "$GITHUB_OUTPUT"
 
       - name: Restore scanner downloads
         id: cache
@@ -207,42 +212,41 @@ jobs:
         if: steps.install.outcome == 'success'
         timeout-minutes: 5
         continue-on-error: true
+        env:
+          RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
           set -uo pipefail
-          zizmor --no-online-audits --format json .github/workflows > zizmor-results.json
-          zizmor --no-online-audits .github/workflows > zizmor-results.txt || true
+          zizmor --no-online-audits --format json .github/workflows > "$RESULT_FILE"
 
       - name: Record scan outcome
         if: always()
+        env:
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          SCAN_OUTCOME: ${{ steps.scan.outcome }}
+          RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
-          if ! jq -e 'type == "array"' zizmor-results.json >/dev/null 2>&1; then
-            echo "::warning::zizmor did not produce valid scan output; inspect install/scan logs."
+          count=""
+          if [ "$INSTALL_OUTCOME" = success ] && [ "$SCAN_OUTCOME" != skipped ] && [ -f "$RESULT_FILE" ]; then
+            count="$(jq -er '. | if type == "array" then length else error("invalid results") end' "$RESULT_FILE" 2>/dev/null || true)"
           fi
           {
             echo "### zizmor"
-            if [ -f zizmor-results.json ]; then
-              count="$(jq 'length' zizmor-results.json 2>/dev/null || true)"
-              if [ -n "${count:-}" ]; then
-                echo "- SCANNED: ${count} finding(s) (see artifact \`zizmor-results\` for detail)"
-              else
-                echo "- SCANNED: output file present but could not be parsed as JSON"
-              fi
+            if [ -n "$count" ]; then
+              echo "- SCANNED: $count finding(s); scan outcome: $SCAN_OUTCOME"
             else
-              echo "- INSTALL-FAILED or NO-OUTPUT: zizmor-results.json not found — check the install/scan step logs above"
+              echo "- INSTALL-FAILED or NO-OUTPUT: install=$INSTALL_OUTCOME scan=$SCAN_OUTCOME; inspect logs"
             fi
           } >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
           exit 0
 
       - name: Upload results artifact
         timeout-minutes: 1
-        if: always()
+        if: always() && steps.install.outcome == 'success' && steps.scan.outcome != 'skipped' && steps.python.outputs.result != ''
         # Non-gating. Findings are already in the step summary above.
         continue-on-error: true
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zizmor-results
-          path: |
-            zizmor-results.json
-            zizmor-results.txt
+          path: ${{ steps.python.outputs.result }}
           if-no-files-found: ignore
           retention-days: 30

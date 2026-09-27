@@ -100,5 +100,43 @@ class ScannerInstallerTests(unittest.TestCase):
                 self.assertIn(dimension, cache["with"]["key"])
 
 
+    def test_summary_rejects_stale_workspace_and_malformed_output(self):
+        import json
+        for tool, job in self.jobs.items():
+            summary_step = next(s for s in job["steps"] if s["name"] == "Record scan outcome")
+            prep = next(s for s in job["steps"] if s.get("id") == "python")
+            self.assertIn('mktemp -d "$RUNNER_TEMP/', prep["run"])
+            self.assertIn("venv/ensurepip", prep["run"])
+            artifact = next(s for s in job["steps"] if s["name"] == "Upload results artifact")
+            self.assertEqual(artifact["with"]["path"], "${{ steps.python.outputs.result }}")
+            self.assertIn("steps.install.outcome == 'success'", artifact["if"])
+            for install, scan, output, expected in (
+                ("failure", "skipped", None, "NO-OUTPUT"),
+                ("success", "skipped", [], "NO-OUTPUT"),
+                ("success", "failure", "malformed", "NO-OUTPUT"),
+                ("success", "success", {"bad": 1}, "NO-OUTPUT"),
+                ("success", "success", [], "SCANNED: 0"),
+                ("success", "failure", [{"finding": True}], "SCANNED: 1"),
+            ):
+                with self.subTest(tool=tool, install=install, scan=scan, output=output):
+                    with tempfile.TemporaryDirectory() as directory:
+                        root = Path(directory)
+                        (root / f"{tool}-results.json").write_text('{"results": []}' if tool == "semgrep" else '[]')
+                        fresh = root / "unique-temp" / "results.json"
+                        fresh.parent.mkdir()
+                        if output is not None:
+                            if output == "malformed":
+                                fresh.write_text("bad json")
+                            else:
+                                fresh.write_text(json.dumps({"results": output} if tool == "semgrep" else output))
+                        summary = root / "summary"
+                        result = subprocess.run(["bash", "-c", summary_step["run"]], cwd=root,
+                            env={**os.environ, "INSTALL_OUTCOME": install, "SCAN_OUTCOME": scan,
+                                 "RESULT_FILE": str(fresh), "GITHUB_STEP_SUMMARY": str(summary)},
+                            capture_output=True, text=True, timeout=5)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn(expected, summary.read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
