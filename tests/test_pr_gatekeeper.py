@@ -828,8 +828,14 @@ class TestReviewEventResolution(unittest.TestCase):
         import yaml
         root = Path(__file__).resolve().parent.parent
         caller = yaml.safe_load((root / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
-        self.assertEqual(caller["concurrency"], {"group": "pr-gatekeeper-${{ github.repository }}",
-                                               "cancel-in-progress": False, "queue": "max"})
+        self.assertNotIn("concurrency", caller)
+        self.assertEqual(caller["jobs"]["gatekeeper"]["concurrency"],
+                         {"group": "pr-gatekeeper-${{ github.repository }}",
+                          "cancel-in-progress": False, "queue": "max"})
+        for signal in ("recover-persona", "review-event"):
+            self.assertIn(signal, caller["jobs"])
+        holders = {name for name, job in caller["jobs"].items() if "concurrency" in job}
+        self.assertEqual(holders, {"gatekeeper"})
 
     def test_partial_publication_attempts_all_refs_and_reports_failure(self):
         for failed_ref in ("head", "merge"):
