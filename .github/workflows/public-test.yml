@@ -50,3 +50,25 @@ jobs:
           python-version: '3.10'
       - name: Compile runner scripts under Python 3.10
         run: python -m py_compile scripts/*.py
+      # py_compile only checks syntax. Loading each script as a module also
+      # runs its module-level imports, so a 3.11+/3.12-only stdlib name
+      # (itertools.batched, datetime.UTC, ...) fails here instead of on a
+      # jammy runner. `__main__` blocks do not run, and scripts that are
+      # only imported lazily (agent_readiness_git) are loaded too. Imports
+      # inside function bodies are still not covered.
+      - name: Load runner scripts under Python 3.10
+        run: |
+          python - <<'EOF'
+          import importlib.util
+          import pathlib
+          import sys
+
+          sys.path.insert(0, "scripts")
+          for path in sorted(pathlib.Path("scripts").glob("*.py")):
+              name = path.stem.replace("-", "_")
+              spec = importlib.util.spec_from_file_location(name, path)
+              module = importlib.util.module_from_spec(spec)
+              sys.modules[name] = module
+              spec.loader.exec_module(module)
+              print(f"loaded {path}")
+          EOF
