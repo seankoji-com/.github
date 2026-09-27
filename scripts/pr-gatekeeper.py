@@ -515,17 +515,17 @@ def persona_progress(checks: list[dict], prior_runs: list[dict],
         age = max(0, (now - since).total_seconds() / 60)
         if state == "failed":
             check["status"], check["conclusion"] = "completed", "failure"
-            message = f"PR #{check["number"]}: review dispatch or job failed; recovery will retry"
+            message = f"PR #{check['number']}: review dispatch or job failed; recovery will retry"
         elif state == "running":
-            message = f"PR #{check["number"]}: review running"
+            message = f"PR #{check['number']}: review running"
             if age >= REVIEW_ALERT_MINUTES:
                 message += f"; alert: running for {int(age)} minutes"
         else:
-            message = f"PR #{check["number"]}: waiting for review dispatch"
+            message = f"PR #{check['number']}: waiting for review dispatch"
             if age >= DISPATCH_ALERT_MINUTES:
                 message += f"; alert: undispatched for {int(age)} minutes"
         check["dispatch_marker"] = (
-            f"<!-- grumpy-dispatch:{check["number"]}:{check["head_sha"]}:{state}:{stamp} -->")
+            f"<!-- grumpy-dispatch:{check['number']}:{check['head_sha']}:{state}:{stamp} -->")
         descriptions.append(message)
     return descriptions
 
