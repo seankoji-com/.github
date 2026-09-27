@@ -834,7 +834,8 @@ class TestReviewEventResolution(unittest.TestCase):
                           "cancel-in-progress": False, "queue": "max"})
         for signal in ("recover-persona", "review-event"):
             self.assertIn(signal, caller["jobs"])
-            self.assertNotIn("concurrency", caller["jobs"][signal])
+        holders = {name for name, job in caller["jobs"].items() if "concurrency" in job}
+        self.assertEqual(holders, {"gatekeeper"})
 
     def test_partial_publication_attempts_all_refs_and_reports_failure(self):
         for failed_ref in ("head", "merge"):
