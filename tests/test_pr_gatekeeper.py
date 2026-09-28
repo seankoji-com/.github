@@ -453,6 +453,11 @@ class TestReviewEventContract(unittest.TestCase):
         helper = yaml.safe_load((root / ".github/workflows/reusable-review-event.yml").read_text())
         self.assertEqual(helper["permissions"], {"contents": "read"})
         self.assertTrue(all("uses" not in step for step in helper["jobs"]["signal"]["steps"]))
+        # Private repos run on the self-hosted pool (immune to the Actions
+        # budget); public repos are not served by any org runner group.
+        self.assertEqual(helper["jobs"]["signal"]["runs-on"],
+                         "${{ github.event.repository.private && "
+                         "fromJSON('[\"self-hosted\", \"Linux\", \"carey-mac\"]') || 'ubuntu-latest' }}")
 
     def test_reusable_gatekeeper_seed_input_contract(self):
         import shutil
