@@ -85,19 +85,50 @@ class NodeWorkflowTests(unittest.TestCase):
 
 
 class SharedWorkflowTests(unittest.TestCase):
-    def test_github_script_inputs_are_environment_data_and_runner_floor_is_documented(self):
+    def test_github_script_data_is_passed_through_matching_environment_keys(self):
+        import re
+
+        workflow_dir = ROOT / ".github" / "workflows"
+        workflow_paths = sorted((*workflow_dir.glob("*.yml"), *workflow_dir.glob("*.yaml")))
+        checked_steps = 0
+        for path in workflow_paths:
+            config = yaml.safe_load(path.read_text()) or {}
+            for job_name, job in config.get("jobs", {}).items():
+                for step_index, step in enumerate(job.get("steps", [])):
+                    if not step.get("uses", "").startswith("actions/github-script@"):
+                        continue
+                    checked_steps += 1
+                    context = f"{path.name}:{job_name}:step-{step_index}"
+                    script = step.get("with", {}).get("script", "")
+                    env = step.get("env", {})
+                    with self.subTest(step=context):
+                        # GitHub expressions in script source are interpolated before
+                        # JavaScript parsing. Pass dynamic values via env instead.
+                        self.assertNotIn("${{", script)
+                        referenced = set(re.findall(r"process\.env\.([A-Za-z_][A-Za-z0-9_]*)", script))
+                        with self.subTest(step=context, env_references=sorted(referenced)):
+                            self.assertTrue(referenced <= set(env))
+                        expression_keys = {
+                            key for key, value in env.items()
+                            if isinstance(value, str) and "${{" in value
+                        }
+                        with self.subTest(step=context, expression_env=sorted(expression_keys)):
+                            self.assertTrue(expression_keys <= referenced)
+        self.assertGreater(checked_steps, 0)
+
+    def test_github_script_runner_floor_is_documented(self):
         for workflow_name in ("reusable-issue-triage.yml", "released.yml"):
             config = workflow(workflow_name)
             on = config.get("on") or config.get(True)
             description = on["workflow_call"]["inputs"]["runner-json"]["description"]
-            self.assertIn("v2.327.1 or newer", description)
-            for job in config["jobs"].values():
-                for step in job.get("steps", []):
-                    if step.get("uses", "").startswith("actions/github-script@"):
-                        script = step.get("with", {}).get("script", "")
-                        self.assertNotIn("${{ inputs.", script)
-                        for value in step.get("env", {}).values():
-                            self.assertRegex(value, r"^\$\{\{ inputs\.[^}]+ \}\}$")
+            with self.subTest(workflow=workflow_name):
+                self.assertIn("v2.327.1 or newer", description)
+
+    def test_issue_triage_jobs_have_finite_timeouts(self):
+        jobs = workflow("reusable-issue-triage.yml")["jobs"]
+        for job_name in ("triage-issue", "link-pr"):
+            with self.subTest(job=job_name):
+                self.assertEqual(jobs[job_name].get("timeout-minutes"), 5)
 
     def test_readiness_stages_companion_at_same_sha_before_running(self):
         job = workflow("reusable-agent-readiness.yml")["jobs"]["agent-readiness"]

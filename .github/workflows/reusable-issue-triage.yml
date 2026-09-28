@@ -25,6 +25,7 @@ jobs:
     name: Auto-label New Issue
     if: github.event_name == 'issues' && github.event.action == 'opened'
     runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 5
     steps:
       - name: Add triage label
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -54,6 +55,7 @@ jobs:
     name: Auto-label Issue with Linked PR
     if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize')
     runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 5
     steps:
       - name: Mark referenced issue as having PR
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
