@@ -28,12 +28,15 @@ jobs:
     steps:
       - name: Add triage label
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BYPASS_LABEL: ${{ inputs.bypass-label }}
+          TRIAGE_LABEL: ${{ inputs.triage-label }}
         with:
           script: |
             const number = context.payload.issue.number;
             const labels = (context.payload.issue.labels ?? []).map(l => l.name);
-            const bypass = '${{ inputs.bypass-label }}';
-            const triage = '${{ inputs.triage-label }}';
+            const bypass = process.env.BYPASS_LABEL;
+            const triage = process.env.TRIAGE_LABEL;
             
             if (labels.includes(bypass)) {
               core.info(`#${number} already has "${bypass}"; skipping "${triage}".`);
