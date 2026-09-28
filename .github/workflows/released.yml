@@ -26,7 +26,7 @@ on:
         type: string
         default: 'Released via seankoji-com/.github released.yml'
       runner-json:
-        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        description: 'JSON runner labels. Self-hosted runners must be v2.327.1 or newer for github-script v9.'
         type: string
         default: '["ubuntu-latest"]'
 

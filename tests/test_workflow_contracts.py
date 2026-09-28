@@ -85,6 +85,20 @@ class NodeWorkflowTests(unittest.TestCase):
 
 
 class SharedWorkflowTests(unittest.TestCase):
+    def test_github_script_inputs_are_environment_data_and_runner_floor_is_documented(self):
+        for workflow_name in ("reusable-issue-triage.yml", "released.yml"):
+            config = workflow(workflow_name)
+            on = config.get("on") or config.get(True)
+            description = on["workflow_call"]["inputs"]["runner-json"]["description"]
+            self.assertIn("v2.327.1 or newer", description)
+            for job in config["jobs"].values():
+                for step in job.get("steps", []):
+                    if step.get("uses", "").startswith("actions/github-script@"):
+                        script = step.get("with", {}).get("script", "")
+                        self.assertNotIn("${{ inputs.", script)
+                        for value in step.get("env", {}).values():
+                            self.assertRegex(value, r"^\$\{\{ inputs\.[^}]+ \}\}$")
+
     def test_readiness_stages_companion_at_same_sha_before_running(self):
         job = workflow("reusable-agent-readiness.yml")["jobs"]["agent-readiness"]
         checkout, stage, score = job["steps"]
