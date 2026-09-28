@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   signal:
-    runs-on: ubuntu-latest # runner-keep-hosted
+    # Private repos run on the self-hosted pool so an exhausted Actions budget
+    # cannot stop the signal. Org runner groups do not serve public repos, and
+    # hosted minutes are free there, so public repos stay on ubuntu-latest.
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux", "carey-mac"]') || 'ubuntu-latest' }} # runner-keep-hosted (public repos only)
     timeout-minutes: 2
     steps:
       - name: Signal review state change
