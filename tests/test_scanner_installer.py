@@ -45,6 +45,8 @@ class ScannerInstallerTests(unittest.TestCase):
                      "SCANNER_FAIL": str(int(scanner_failure))},
                 capture_output=True, text=True, timeout=5,
             )
+            if github_path.exists():
+                self.assertEqual(github_path.read_text(), f"{binary}\n")
             if not pip_failure:
                 self.assertEqual(scanner_log.read_text().splitlines(), ["--version"])
             return result, log.read_text().splitlines(), (
@@ -179,7 +181,15 @@ class ScannerInstallerTests(unittest.TestCase):
                                  "RESULT_FILE": str(fresh), "GITHUB_STEP_SUMMARY": str(summary)},
                             capture_output=True, text=True, timeout=5)
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        self.assertIn(expected, summary.read_text())
+                        expected_line = (
+                            f"- INSTALL-FAILED or NO-OUTPUT: install={install} scan={scan}; inspect logs"
+                            if expected == "NO-OUTPUT" else
+                            f"- SCANNED: {len(output)} finding(s); scan outcome: {scan}"
+                        )
+                        self.assertEqual(
+                            [line for line in summary.read_text().splitlines() if line.startswith("- ")],
+                            [expected_line],
+                        )
 
 
 if __name__ == "__main__":
