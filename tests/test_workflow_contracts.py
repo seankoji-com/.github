@@ -105,7 +105,13 @@ class SharedWorkflowTests(unittest.TestCase):
                         # GitHub expressions in script source are interpolated before
                         # JavaScript parsing. Pass dynamic values via env instead.
                         self.assertNotIn("${{", script)
-                        referenced = set(re.findall(r"process\.env\.([A-Za-z_][A-Za-z0-9_]*)", script))
+                        referenced = set(
+                            re.findall(r"process\.env\.([A-Za-z_][A-Za-z0-9_]*)", script)
+                            + re.findall(
+                                r"""process\.env\[\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*\]""",
+                                script,
+                            )
+                        )
                         with self.subTest(step=context, env_references=sorted(referenced)):
                             self.assertTrue(referenced <= set(env))
                         expression_keys = {
@@ -123,12 +129,51 @@ class SharedWorkflowTests(unittest.TestCase):
             description = on["workflow_call"]["inputs"]["runner-json"]["description"]
             with self.subTest(workflow=workflow_name):
                 self.assertIn("v2.327.1 or newer", description)
+        self.assertIn("v2.327.1 or newer", (ROOT / "README.md").read_text())
 
-    def test_issue_triage_jobs_have_finite_timeouts(self):
-        jobs = workflow("reusable-issue-triage.yml")["jobs"]
-        for job_name in ("triage-issue", "link-pr"):
-            with self.subTest(job=job_name):
-                self.assertEqual(jobs[job_name].get("timeout-minutes"), 5)
+    def test_issue_triage_label_script_treats_inputs_as_literal_data(self):
+        job = workflow("reusable-issue-triage.yml")["jobs"]["triage-issue"]
+        step = next(step for step in job["steps"] if step.get("name") == "Add triage label")
+        script = step["with"]["script"]
+        self.assertNotIn("${{", script)
+        self.assertEqual(step["env"]["BYPASS_LABEL"], "${{ inputs.bypass-label }}")
+        self.assertEqual(step["env"]["TRIAGE_LABEL"], "${{ inputs.triage-label }}")
+        triage = "needs-triage'\n${{ inputs.triage-label }}"
+        bypass = "ready'\n${{ inputs.bypass-label }}"
+        for labels, expect_call in ((["bug"], True), ([bypass], False), ([bypass, "bug"], False)):
+            with self.subTest(labels=labels):
+                labels_js = json.dumps([{"name": name} for name in labels])
+                wrapper = (
+                    "const calls = [];\n"
+                    "const context = {repo: {owner: 'example', repo: 'app'}, "
+                    "payload: {issue: {number: 7, labels: " + labels_js + "}}};\n"
+                    "const github = {rest: {issues: {addLabels: async (args) => {calls.push(args);}}}};\n"
+                    "const core = {info: () => {}, warning: () => {}, "
+                    "setFailed: (message) => {throw Error(message);}};\n"
+                    "(async () => {\ntry {\n" + script + "\n} finally {\n"
+                    "console.log(JSON.stringify(calls));\n}\n})();\n"
+                )
+                result = subprocess.run(
+                    ["node", "-e", wrapper], check=True, capture_output=True, text=True,
+                    env={**os.environ, "BYPASS_LABEL": bypass, "TRIAGE_LABEL": triage},
+                )
+                calls = json.loads(result.stdout)
+                if expect_call:
+                    self.assertEqual(calls, [{
+                        "owner": "example", "repo": "app", "issue_number": 7, "labels": [triage],
+                    }])
+                else:
+                    self.assertEqual(calls, [])
+
+    def test_github_script_jobs_have_finite_timeouts(self):
+        for workflow_name in ("reusable-issue-triage.yml", "released.yml"):
+            jobs = workflow(workflow_name)["jobs"]
+            self.assertTrue(jobs)
+            for job_name, job in jobs.items():
+                with self.subTest(workflow=workflow_name, job=job_name):
+                    timeout = job.get("timeout-minutes")
+                    self.assertIsInstance(timeout, int)
+                    self.assertGreater(timeout, 0)
 
     def test_readiness_stages_companion_at_same_sha_before_running(self):
         job = workflow("reusable-agent-readiness.yml")["jobs"]["agent-readiness"]

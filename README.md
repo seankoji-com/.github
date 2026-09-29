@@ -49,8 +49,9 @@ Available reusable workflows include:
   a GitHub-hosted runner with zsh available. The caller's `.shellspec` selects
   the shell, for example `--shell /bin/zsh`. The workflow needs `contents: read`.
 - [Issue triage](.github/workflows/reusable-issue-triage.yml) and
-  [release markers](.github/workflows/released.yml) use `github-script` v9;
-  callers selecting self-hosted runners must use Actions runner v2.327.1 or newer.
+  [release markers](.github/workflows/released.yml) use `actions/github-script`.
+  Callers selecting self-hosted runners must use Actions runner v2.327.1 or newer.
+  Issue triage needs `issues: write` (and `pull-requests: read` for the PR-sync job).
 
 For example, a deployment workflow can publish the standard release marker:
 
