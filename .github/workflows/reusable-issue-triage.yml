@@ -12,7 +12,7 @@ on:
         type: string
         default: 'ready'
       runner-json:
-        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        description: 'JSON runner labels. Self-hosted runners must be v2.327.1 or newer for github-script v9.'
         type: string
         default: '["ubuntu-latest"]'
 
@@ -25,15 +25,19 @@ jobs:
     name: Auto-label New Issue
     if: github.event_name == 'issues' && github.event.action == 'opened'
     runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 5
     steps:
       - name: Add triage label
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          BYPASS_LABEL: ${{ inputs.bypass-label }}
+          TRIAGE_LABEL: ${{ inputs.triage-label }}
         with:
           script: |
             const number = context.payload.issue.number;
             const labels = (context.payload.issue.labels ?? []).map(l => l.name);
-            const bypass = '${{ inputs.bypass-label }}';
-            const triage = '${{ inputs.triage-label }}';
+            const bypass = process.env.BYPASS_LABEL;
+            const triage = process.env.TRIAGE_LABEL;
             
             if (labels.includes(bypass)) {
               core.info(`#${number} already has "${bypass}"; skipping "${triage}".`);
@@ -51,9 +55,10 @@ jobs:
     name: Auto-label Issue with Linked PR
     if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize')
     runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 5
     steps:
       - name: Mark referenced issue as having PR
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const prBody = context.payload.pull_request.body || '';
