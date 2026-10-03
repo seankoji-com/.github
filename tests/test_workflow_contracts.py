@@ -327,6 +327,14 @@ printf '# staged fixture\\n' > "$destination"
             written = output.read_text() if output.exists() else ""
         return result, written
 
+    @staticmethod
+    def parse_output(written):
+        head, _, rest = written.partition("\n")
+        name, _, delimiter = head.partition("<<")
+        assert name == "args" and delimiter, written
+        assert rest.endswith("\n" + delimiter + "\n"), written
+        return rest[:-len(delimiter) - 2]
+
     def test_link_checker_adds_config_only_when_the_file_exists(self):
         args = "--verbose './**/*.md'"
         cases = (
@@ -335,12 +343,23 @@ printf '# staged fixture\\n' > "$destination"
             ((".lychee.toml",), "", args, args),
             ((".lychee.toml",), ".lychee.toml", "--config other.toml './**/*.md'", "--config other.toml './**/*.md'"),
             (("ci/lychee.toml",), "ci/lychee.toml", args, f"--config ci/lychee.toml {args}"),
+            ((".lychee.toml",), ".lychee.toml", "--config=other.toml './**/*.md'", "--config=other.toml './**/*.md'"),
+            ((".lychee.toml",), ".lychee.toml", "--exclude 'x--config-y' './**/*.md'",
+             "--config .lychee.toml --exclude 'x--config-y' './**/*.md'"),
         )
         for files, config_file, given, expected in cases:
             with self.subTest(files=files, config_file=config_file, args=given):
                 result, written = self.run_config_step(files, config_file, given)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(written, f"args<<LYCHEE_ARGS_EOF\n{expected}\nLYCHEE_ARGS_EOF\n")
+                self.assertEqual(self.parse_output(written), expected)
+
+    def test_link_checker_args_cannot_forge_other_outputs(self):
+        hostile = "--verbose\nLYCHEE_ARGS_EOF\nname=value"
+        result, written = self.run_config_step((".lychee.toml",), ".lychee.toml", hostile)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.parse_output(written), f"--config .lychee.toml {hostile}")
+        result, _ = self.run_config_step((), "bad\n::error::x.toml", "--verbose")
+        self.assertNotIn("bad", result.stdout)
 
     def test_link_checker_rejects_config_paths_that_args_would_eval(self):
         for name in ("a b.toml", "x;touch pwned.toml", "$(id).toml", "-x.toml", "q'.toml"):
