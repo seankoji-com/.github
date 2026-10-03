@@ -1,2 +1,2 @@
 # Test dependencies for public-test.yml. Dependabot (pip) keeps these current.
-PyYAML==6.0.2
+PyYAML==6.0.3
