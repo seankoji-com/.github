@@ -54,7 +54,7 @@ jobs:
         if: steps.python.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 1
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/scanner-pip-cache
           key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-semgrep-1.176.0-pip-25.2
@@ -170,7 +170,7 @@ jobs:
         if: steps.python.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 1
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/scanner-pip-cache
           key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-zizmor-1.30.0-pip-25.2
