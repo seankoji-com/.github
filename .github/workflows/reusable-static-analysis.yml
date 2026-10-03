@@ -22,6 +22,16 @@ on:
 permissions:
   contents: read
 
+# Scanner pins, defined once. scripts/update_tool_pins.py rewrites these lines
+# in a weekly PR (Dependabot cannot read workflow env); keep each value quoted
+# on its own line. The cache keys and install steps below read them from here.
+env:
+  PIN_PIP: "25.2"
+  PIN_SEMGREP: "1.176.0"
+  # The ~= release semgrep itself requires for its OpenTelemetry instrumentation.
+  PIN_SEMGREP_OTEL: "0.58b0"
+  PIN_ZIZMOR: "1.30.0"
+
 jobs:
   semgrep:
     name: semgrep
@@ -57,7 +67,7 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/scanner-pip-cache
-          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-semgrep-1.176.0-pip-25.2
+          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-semgrep-${{ env.PIN_SEMGREP }}-otel-${{ env.PIN_SEMGREP_OTEL }}-pip-${{ env.PIN_PIP }}
 
       - name: Install Semgrep
         id: install
@@ -71,13 +81,13 @@ jobs:
           set -euo pipefail
           scanner_python="$RUNNER_TEMP/semgrep-venv/bin/python"
           "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==25.2"
-          # Semgrep 1.176 uses SDK 1.37 / semantic-conventions 0.58b0.
-          # Match instrumentation to that SDK instead of backtracking newer releases.
+            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==${PIN_PIP}"
+          # Match instrumentation to the SDK semgrep requires instead of
+          # backtracking newer releases.
           "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "semgrep==1.176.0" \
-            "opentelemetry-instrumentation-requests==0.58b0" \
-            "opentelemetry-instrumentation-threading==0.58b0"
+            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "semgrep==${PIN_SEMGREP}" \
+            "opentelemetry-instrumentation-requests==${PIN_SEMGREP_OTEL}" \
+            "opentelemetry-instrumentation-threading==${PIN_SEMGREP_OTEL}"
           "$scanner_python" -m pip check
           "$RUNNER_TEMP/semgrep-venv/bin/semgrep" --version
           echo "$RUNNER_TEMP/semgrep-venv/bin" >> "$GITHUB_PATH"
@@ -173,7 +183,7 @@ jobs:
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: ${{ runner.temp }}/scanner-pip-cache
-          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-zizmor-1.30.0-pip-25.2
+          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-zizmor-${{ env.PIN_ZIZMOR }}-pip-${{ env.PIN_PIP }}
 
       - name: Install zizmor
         id: install
@@ -187,9 +197,9 @@ jobs:
           set -euo pipefail
           scanner_python="$RUNNER_TEMP/zizmor-venv/bin/python"
           "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==25.2"
+            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==${PIN_PIP}"
           "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "zizmor==1.30.0"
+            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "zizmor==${PIN_ZIZMOR}"
           "$scanner_python" -m pip check
           "$RUNNER_TEMP/zizmor-venv/bin/zizmor" --version
           echo "$RUNNER_TEMP/zizmor-venv/bin" >> "$GITHUB_PATH"

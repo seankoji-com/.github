@@ -1,0 +1,221 @@
+name: Update tool pins
+
+# Weekly refresh of the tool versions Dependabot cannot see: pip, semgrep and
+# zizmor in reusable-static-analysis.yml, actionlint in public-test.yml.
+# Two jobs, so freshly released scanner code never runs beside a write token:
+#   resolve  read-only. Finds newer versions, installs and exercises the new
+#            scanners under Python 3.10, and uploads a small JSON report.
+#   publish  write access, runs no scanner. Re-validates the report, applies
+#            only pin lines, then opens or updates one PR. Never merges.
+# See docs/tool-pins.md.
+
+on:
+  schedule:
+    - cron: '17 2 * * 1'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: update-tool-pins
+  cancel-in-progress: false
+
+env:
+  # Owned by this workflow: force-pushed when its content changes, so do not push to it.
+  BRANCH: automation/tool-pins
+
+jobs:
+  resolve:
+    # A schedule payload carries no repository object, so test the event first.
+    # Manual runs from a feature branch must not open a PR against itself.
+    if: github.event_name == 'schedule' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.refresh.outputs.changed }}
+      errors: ${{ steps.refresh.outputs.errors }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Oldest interpreter the self-hosted pools ship; the script only accepts
+      # releases that support it, and the verify step below runs on it.
+      - name: Set up Python 3.10
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.10'
+
+      - name: Refresh pins
+        id: refresh
+        env:
+          # Read-only token, sent to api.github.com only, to avoid shared-IP rate limits.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          python3 scripts/update_tool_pins.py --report "$RUNNER_TEMP/report.json"
+          code=$?
+          set -e
+          # 0 = ok, 2 = some tools failed to resolve (reported by publish). Anything else is a crash.
+          case "$code" in 0|2) ;; *) exit "$code" ;; esac
+          if git diff --quiet; then echo "changed=false" >> "$GITHUB_OUTPUT"; else echo "changed=true" >> "$GITHUB_OUTPUT"; fi
+          echo "errors=$(jq '.errors | length' "$RUNNER_TEMP/report.json")" >> "$GITHUB_OUTPUT"
+
+      # Same install the reusable workflow performs, with the new pins. Scanner
+      # install and scan failures are advisory there (they only show as
+      # INSTALL-FAILED / NO-OUTPUT), so this is the gate that keeps an unusable
+      # version out of the fleet. It also checks the JSON shapes the reusable
+      # workflow's "Record scan outcome" steps parse.
+      - name: Verify the new scanner pins install and emit parseable output
+        if: steps.refresh.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          while IFS='=' read -r name value; do
+            [[ "$value" =~ ^[0-9A-Za-z.]+$ ]] || { echo "::error::unexpected value for $name"; exit 1; }
+            declare "$name=$value"
+          done < <(python3 scripts/update_tool_pins.py --print-pins)
+          install() {
+            "$1/bin/python" -m pip install --disable-pip-version-check --no-input \
+              --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "${@:2}"
+          }
+          python -m venv "$RUNNER_TEMP/semgrep-venv"
+          install "$RUNNER_TEMP/semgrep-venv" "pip==${PIN_PIP}"
+          install "$RUNNER_TEMP/semgrep-venv" "semgrep==${PIN_SEMGREP}" \
+            "opentelemetry-instrumentation-requests==${PIN_SEMGREP_OTEL}" \
+            "opentelemetry-instrumentation-threading==${PIN_SEMGREP_OTEL}"
+          "$RUNNER_TEMP/semgrep-venv/bin/python" -m pip check
+          "$RUNNER_TEMP/semgrep-venv/bin/semgrep" --version
+          python -m venv "$RUNNER_TEMP/zizmor-venv"
+          install "$RUNNER_TEMP/zizmor-venv" "pip==${PIN_PIP}"
+          install "$RUNNER_TEMP/zizmor-venv" "zizmor==${PIN_ZIZMOR}"
+          "$RUNNER_TEMP/zizmor-venv/bin/python" -m pip check
+          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" --version
+
+          # Output shape. A local one-line rule keeps this offline and deterministic.
+          cd "$RUNNER_TEMP"
+          printf 'rules:\n  - id: pin-check\n    pattern: pin_check()\n    message: m\n    languages: [python]\n    severity: INFO\n' > rule.yml
+          echo 'pin_check()' > sample.py
+          SEMGREP_SEND_METRICS=off "$RUNNER_TEMP/semgrep-venv/bin/semgrep" scan --config rule.yml \
+            --metrics=off --json --output semgrep.json sample.py
+          jq -e '.results | type == "array" and length == 1' semgrep.json
+          # zizmor exits non-zero when it reports findings; only the JSON shape matters here.
+          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" --no-online-audits --format json \
+            "$GITHUB_WORKSPACE/.github/workflows" > zizmor.json || true
+          jq -e 'type == "array"' zizmor.json
+
+      - name: Upload report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: tool-pins-report
+          path: ${{ runner.temp }}/report.json
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write       # push the automation branch
+      pull-requests: write  # open, update or close its PR
+      actions: write        # dispatch public-test on the branch (see below)
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CHANGED: ${{ needs.resolve.outputs.changed }}
+      ERRORS: ${{ needs.resolve.outputs.errors }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download report
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: tool-pins-report
+          path: ${{ runner.temp }}/report
+
+      # Needs the repository setting "Allow GitHub Actions to create and approve
+      # pull requests". Without it the push still succeeds and the job fails
+      # with a compare link instead of opening the PR.
+      - name: Open or update the pull request
+        if: env.CHANGED == 'true'
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/report/report.json"
+          gh auth setup-git
+          number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          # A partial run would rebuild the branch without the unresolved tools' bumps.
+          if [ "$ERRORS" != 0 ] && [ -n "$number" ]; then
+            echo "::warning::Some tools did not resolve; leaving open PR #$number as it is."
+            exit 0
+          fi
+
+          # Re-validates every entry (known pin, plain version or digest, old value still current).
+          python3 scripts/update_tool_pins.py --apply-report "$report"
+          {
+            echo "Automated refresh of pins that Dependabot cannot read. See \`docs/tool-pins.md\`."
+            echo
+            echo "| Tool | Pin | Old | New |"
+            echo "| --- | --- | --- | --- |"
+            jq -r '.changes[] | "| \(.tool) | `\(.name)` | `\(.old)` | `\(.new)` |"' "$report"
+            echo
+            echo "- The new scanner versions were installed under Python 3.10, passed \`pip check\`, and produced the JSON the reusable workflow parses, before this PR was opened."
+            echo "- \`PIN_ACTIONLINT_SHA256\` is copied from the upstream release's \`checksums.txt\` over HTTPS. It pins what was published; it does not authenticate the release."
+            echo "- Nothing here merges itself. Review the diff, then merge when checks are green."
+          } > "$RUNNER_TEMP/body.md"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add .github/workflows/reusable-static-analysis.yml .github/workflows/public-test.yml
+          git commit -m "chore(deps): refresh pinned tool versions"
+
+          # Same content as the branch already holds: do not move it, so approvals
+          # and test runs on the open PR stay valid.
+          unchanged=false
+          if git fetch --quiet origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" 2>/dev/null \
+              && git diff --quiet "origin/$BRANCH" HEAD; then
+            unchanged=true
+          else
+            git push --force origin "$BRANCH"
+          fi
+
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --body-file "$RUNNER_TEMP/body.md"
+          elif ! gh pr create --head "$BRANCH" --base "$GITHUB_REF_NAME" \
+              --title "chore(deps): refresh pinned tool versions" \
+              --body-file "$RUNNER_TEMP/body.md" --label dependencies --label type:chore; then
+            echo "::error::Could not open the PR. Branch $BRANCH is pushed: https://github.com/$GITHUB_REPOSITORY/compare/$BRANCH?expand=1"
+            exit 1
+          fi
+
+          # A PR opened with GITHUB_TOKEN does not trigger pull_request workflows,
+          # but workflow_dispatch is exempt. Run the tests on the branch so the PR
+          # carries real results. If the gate check is still missing, close and
+          # reopen the PR.
+          if [ "$unchanged" = false ]; then
+            gh workflow run public-test.yml --ref "$BRANCH"
+          fi
+
+      # Only when every tool resolved: a transient fetch error must not close a
+      # PR whose bumps are still pending.
+      - name: Close the PR when main already has these pins
+        if: env.CHANGED == 'false' && env.ERRORS == '0'
+        run: |
+          number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
+          if [ -n "$number" ]; then
+            gh pr close "$number" --comment "Pins on the default branch are already current."
+          fi
+
+      - name: Fail when a tool could not be resolved
+        if: always() && needs.resolve.result == 'success' && env.ERRORS != '0'
+        run: |
+          {
+            echo "### Tool pins that could not be refreshed"
+            jq -r '.errors[] | "- \(.)"' "$RUNNER_TEMP/report/report.json"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 1

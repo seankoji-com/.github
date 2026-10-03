@@ -94,9 +94,13 @@ Report vulnerabilities using the instructions in [SECURITY.md](SECURITY.md).
 
 ## Validation
 
-With Python 3, Node.js, Bash and PyYAML (`pip install PyYAML==6.0.2`) installed,
-run from the repository root:
+With Python 3, Node.js and Bash installed and the test dependency set up
+(`python3 -m pip install -r requirements-test.txt`), run from the repository
+root:
 
 ```sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 ```
+
+Pinned tool versions are refreshed automatically; see
+[docs/tool-pins.md](docs/tool-pins.md).

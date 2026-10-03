@@ -15,3 +15,18 @@ updates:
         update-types:
           - minor
           - patch
+
+  # requirements-test.txt (public-test.yml). Scanner, pip and actionlint pins
+  # live in workflow env, which Dependabot cannot read; see docs/tool-pins.md.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "type:chore"
+      - "dependencies"
+    groups:
+      pip-minor-and-patch:
+        update-types:
+          - minor
+          - patch

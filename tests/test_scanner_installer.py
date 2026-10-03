@@ -16,7 +16,10 @@ WORKFLOW = ROOT / ".github/workflows/reusable-static-analysis.yml"
 class ScannerInstallerTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+        document = yaml.safe_load(WORKFLOW.read_text())
+        cls.jobs = document["jobs"]
+        # Pins are defined once in workflow-level env; steps read them from there.
+        cls.pins = document["env"]
 
     def install(self, tool, *, pip_failure=False, scanner_failure=False):
         with tempfile.TemporaryDirectory(prefix="scanner-install-") as directory:
@@ -38,7 +41,7 @@ class ScannerInstallerTests(unittest.TestCase):
             step = next(s for s in self.jobs[tool]["steps"] if s.get("id") == "install")
             result = subprocess.run(
                 [shutil.which("bash"), "-c", step["run"]],
-                env={"PATH": str(binary), "RUNNER_TEMP": directory,
+                env={**self.pins, "PATH": str(binary), "RUNNER_TEMP": directory,
                      "SCANNER_LOG": str(scanner_log),
                      "GITHUB_PATH": str(github_path), "CALL_LOG": str(log),
                      "PIP_FAIL": str(int(pip_failure)),
@@ -54,13 +57,17 @@ class ScannerInstallerTests(unittest.TestCase):
             )
 
     def test_success_uses_only_isolated_pip_and_publishes_verified_scanner(self):
-        for tool, version in (("semgrep", "1.176.0"), ("zizmor", "1.30.0")):
+        for tool in ("semgrep", "zizmor"):
             with self.subTest(tool=tool):
                 result, calls, path = self.install(tool)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(len(calls), 3)
-                self.assertIn("pip==25.2", calls[0])
-                self.assertIn(f"{tool}=={version}", calls[1])
+                self.assertIn(f"pip=={self.pins['PIN_PIP']}", calls[0])
+                self.assertIn(f"{tool}=={self.pins['PIN_' + tool.upper()]}", calls[1])
+                if tool == "semgrep":
+                    otel = self.pins["PIN_SEMGREP_OTEL"]
+                    for package in ("requests", "threading"):
+                        self.assertIn(f"opentelemetry-instrumentation-{package}=={otel}", calls[1])
                 self.assertEqual(calls[2], "-m pip check")
                 for call in calls[:2]:
                     self.assertIn("--timeout 30 --retries 2", call)
@@ -113,6 +120,22 @@ class ScannerInstallerTests(unittest.TestCase):
                 self.assertIn(dimension, cache["with"]["key"])
 
 
+    def test_pins_live_only_in_env_and_every_pin_is_in_its_cache_key(self):
+        import re
+        for name, value in self.pins.items():
+            with self.subTest(pin=name):
+                # Quoted: an unquoted 25.2 would load as a float and lose trailing zeros.
+                self.assertIsInstance(value, str)
+                self.assertRegex(WORKFLOW.read_text(), rf'(?m)^  {name}: "{re.escape(value)}"')
+                self.assertEqual(WORKFLOW.read_text().count(f'"{value}"'), 1, f"{name} literal repeated")
+        for tool, job in self.jobs.items():
+            cache = next(s for s in job["steps"] if s.get("id") == "cache")
+            wanted = {f"PIN_{tool.upper()}", "PIN_PIP"}
+            if tool == "semgrep":
+                wanted.add("PIN_SEMGREP_OTEL")
+            for name in wanted:
+                self.assertIn("${{ env." + name + " }}", cache["with"]["key"])
+
     def test_prepare_publishes_fresh_results_only_after_working_venv(self):
         for tool, job in self.jobs.items():
             prep = next(s for s in job["steps"] if s.get("id") == "python")
@@ -128,7 +151,7 @@ class ScannerInstallerTests(unittest.TestCase):
                         (binary / "mktemp").symlink_to(shutil.which("mktemp"))
                         output = root / "output"
                         result = subprocess.run([shutil.which("bash"), "-c", prep["run"]],
-                            env={"PATH": str(binary), "RUNNER_TEMP": directory,
+                            env={**self.pins, "PATH": str(binary), "RUNNER_TEMP": directory,
                                  "GITHUB_OUTPUT": str(output), "VENV_FAIL": str(int(fail))},
                             capture_output=True, text=True, timeout=5)
                         outputs = dict(line.split("=", 1) for line in output.read_text().splitlines())
