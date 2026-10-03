@@ -23,17 +23,19 @@ jobs:
         with:
           persist-credentials: false
       - name: Install test dependency
-        run: python3 -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
+        run: python3 -m pip install --disable-pip-version-check -r requirements-test.txt
       # Pinned for WorkflowSyntaxTests; it skips the actionlint check if absent.
+      # scripts/update_tool_pins.py rewrites these two values in a weekly PR;
+      # keep each quoted on its own line.
       - name: Install actionlint
         env:
-          VERSION: 1.7.12
-          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+          PIN_ACTIONLINT: "1.7.12"
+          PIN_ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
         run: |
           set -euo pipefail
-          tarball="actionlint_${VERSION}_linux_amd64.tar.gz"
-          curl -fsSLo "$RUNNER_TEMP/$tarball" "https://github.com/rhysd/actionlint/releases/download/v${VERSION}/${tarball}"
-          echo "${SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
+          tarball="actionlint_${PIN_ACTIONLINT}_linux_amd64.tar.gz"
+          curl -fsSLo "$RUNNER_TEMP/$tarball" "https://github.com/rhysd/actionlint/releases/download/v${PIN_ACTIONLINT}/${tarball}"
+          echo "${PIN_ACTIONLINT_SHA256}  $RUNNER_TEMP/$tarball" | sha256sum -c -
           tar -xzf "$RUNNER_TEMP/$tarball" -C "$RUNNER_TEMP" actionlint
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
       - name: Run tests
