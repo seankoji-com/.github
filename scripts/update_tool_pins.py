@@ -53,7 +53,7 @@ PIN_NAMES = (
 
 STABLE = re.compile(r"\d+(\.\d+)*")
 SHA256 = re.compile(r"[0-9a-f]{64}")
-OTEL_SPEC = re.compile(r"~=\s*(\d+\.\d+b\d+)")
+OTEL_SPEC = re.compile(r"~=\s*(\d+(?:\.\d+)+(?:b\d+)?)(?![\w.])")
 
 Fetch = Callable[[str], bytes]
 
@@ -127,24 +127,31 @@ def version_key(version: str) -> tuple[int, ...]:
 
 
 def python_ok(requires_python: str | None) -> bool:
-    """False when a `>=`/`>` bound excludes MIN_PYTHON. Other clauses are ignored."""
+    """False when any clause of a Requires-Python spec excludes MIN_PYTHON.
+
+    Compares major.minor only, so a patch-level bound never rejects a release.
+    Unrecognised clauses are ignored; the Python 3.10 verify job is the backstop.
+    """
     for clause in (requires_python or "").split(","):
-        match = re.fullmatch(r"\s*(>=|>)\s*(\d+)\.(\d+)(?:\.\d+)?\s*", clause)
+        match = re.fullmatch(r"\s*(>=|<=|==|!=|>|<)\s*(\d+)\.(\d+)(?:\.(?:\d+|\*))?\s*", clause)
         if not match:
             continue
-        bound = (int(match.group(2)), int(match.group(3)))
-        if bound > MIN_PYTHON or (match.group(1) == ">" and bound == MIN_PYTHON):
+        op, bound = match.group(1), (int(match.group(2)), int(match.group(3)))
+        holds = {">=": MIN_PYTHON >= bound, ">": MIN_PYTHON > bound, "<=": MIN_PYTHON <= bound,
+                 "<": MIN_PYTHON < bound, "==": MIN_PYTHON == bound,
+                 # `!=3.10.1` excludes one patch release only; `!=3.10.*` excludes them all.
+                 "!=": MIN_PYTHON != bound or not clause.strip().endswith(".*")}[op]
+        if not holds:
             return False
     return True
 
 
 def newest_stable(releases: dict) -> str:
-    """Highest final release that is not yanked and still runs on MIN_PYTHON."""
+    """Highest final release with a non-yanked file that runs on MIN_PYTHON."""
     usable = [
         version for version, files in releases.items()
-        if STABLE.fullmatch(version) and files
-        and not any(f.get("yanked") for f in files)
-        and all(python_ok(f.get("requires_python")) for f in files)
+        if STABLE.fullmatch(version)
+        and any(not f.get("yanked") and python_ok(f.get("requires_python")) for f in files)
     ]
     if not usable:
         raise ValueError("no stable release supports Python %d.%d" % MIN_PYTHON)
@@ -255,6 +262,10 @@ def validate_change(change: Change, root: Path) -> None:
     for value in (change.old, change.new):
         if not isinstance(value, str) or not pattern.fullmatch(value):
             raise ValueError(f"{change.name}: unexpected value {value!r}")
+    if not change.name.endswith("_SHA256"):
+        number = lambda v: tuple(int(n) for n in re.findall(r"\d+", v))  # noqa: E731 - 0.58b0 -> (0, 58, 0)
+        if number(change.new) <= number(change.old):
+            raise ValueError(f"{change.name}: {change.new} does not raise {change.old}")
     if read_pin((root / change.file).read_text(), change.name) != change.old:
         raise ValueError(f"{change.name}: pin is no longer {change.old}; rerun the update")
 

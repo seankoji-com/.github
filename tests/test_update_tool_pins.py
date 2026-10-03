@@ -127,7 +127,10 @@ class VersionSelectionTests(unittest.TestCase):
     def test_python_ok(self):
         for spec, expected in ((None, True), (">=3.9", True), (">=3.10", True), (">=3.10.0", True),
                                (">=3.11", False), (">3.10", False), (">=3.9,<4", True),
-                               (">=3.12,<4", False), ("~=3.9", True)):
+                               (">=3.12,<4", False), ("~=3.9", True),
+                               (">=3.9,<3.10", False), ("<=3.9", False), ("<=3.10", True),
+                               (">=3.8,<4", True), ("!=3.10.*", False), ("!=3.10.1", True),
+                               (">=3.8,!=3.9.*", True), ("==3.10.*", True), ("==3.11.*", False)):
             with self.subTest(spec=spec):
                 self.assertEqual(utp.python_ok(spec), expected)
 
@@ -140,6 +143,13 @@ class VersionSelectionTests(unittest.TestCase):
             "5.0": [],
         }
         self.assertEqual(utp.newest_stable(releases), "1.9")
+
+    def test_one_yanked_file_does_not_hide_a_release_with_a_usable_file(self):
+        files = [{"yanked": True, "requires_python": ">=3.9"}, {"yanked": False, "requires_python": ">=3.9"}]
+        self.assertEqual(utp.newest_stable({"1.0": [{"yanked": False}], "2.0": files}), "2.0")
+        # Usable means non-yanked AND compatible; a compatible-but-yanked file alone is not enough.
+        mixed = [{"yanked": True, "requires_python": ">=3.9"}, {"yanked": False, "requires_python": ">=3.12"}]
+        self.assertEqual(utp.newest_stable({"1.0": [{"yanked": False}], "2.0": mixed}), "1.0")
 
     def test_versions_compare_numerically(self):
         self.assertEqual(utp.newest_stable(release("1.9.0", "1.10.0", "1.2.0")), "1.10.0")
@@ -155,6 +165,13 @@ class SemgrepOtelTests(unittest.TestCase):
 
     def test_reads_the_tilde_equals_release(self):
         self.assertEqual(utp.semgrep_otel("2.0.0", self.fetch(*OTEL_OK)), "0.61b0")
+
+    def test_accepts_stable_and_beta_spellings(self):
+        for spec, expected in (("~=0.62.0", "0.62.0"), ("~=0.62b0", "0.62b0"), ("~= 1.2", "1.2")):
+            with self.subTest(spec=spec):
+                requirements = (f"opentelemetry-instrumentation-requests{spec}",
+                                f"opentelemetry-instrumentation-threading{spec}")
+                self.assertEqual(utp.semgrep_otel("2.0.0", self.fetch(*requirements)), expected)
 
     def test_rejects_missing_disagreeing_or_unpinned_instrumentation(self):
         cases = {
@@ -420,6 +437,9 @@ class ApplyReportTests(Sandbox):
             "stale old": self.entry(old="24.0"),
             "bad digest": self.entry(name="PIN_ACTIONLINT_SHA256", file=utp.TESTS, old=DIGEST_OLD, new="abc"),
             "non-string": self.entry(new=26),
+            "downgrade": self.entry(new="24.0"),
+            "no change": self.entry(new="25.2"),
+            "otel downgrade": self.entry(name="PIN_SEMGREP_OTEL", old="0.58b0", new="0.57b0", tool="semgrep"),
         }
         for label, entry in bad.items():
             with self.subTest(label):
