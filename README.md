@@ -37,6 +37,8 @@ Available reusable workflows include:
 - `reusable-dependabot-automerge.yml`
 - `reusable-issue-triage.yml`
 - `reusable-link-check.yml`
+- `reusable-review-event.yml`
+- `reusable-persona-recovery-request.yml`
 - `released.yml`
 
 - [Node CI](.github/workflows/reusable-node-ci.yml) accepts `pnpm`, `npm`, or

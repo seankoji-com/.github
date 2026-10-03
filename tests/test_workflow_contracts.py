@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -285,6 +286,78 @@ printf '# staged fixture\\n' > "$destination"
 
     def test_link_checker_needs_no_write_token(self):
         self.assertEqual(workflow("reusable-link-check.yml")["permissions"], {"contents": "read"})
+
+    def test_link_checker_passes_only_inputs_the_pinned_action_declares(self):
+        # Inputs declared by lychee-action's action.yml at each pinned SHA
+        # (v2.9.0). A key outside this set is silently ignored by GitHub, which
+        # is how `config:` went unnoticed. Update the table with the pin.
+        declared = {
+            "e7477775783ea5526144ba13e8db5eec57747ce8": {
+                "args", "debug", "fail", "failIfEmpty", "format", "jobSummary",
+                "lycheeVersion", "output", "checkbox", "token", "workingDirectory",
+            },
+        }
+        path = ROOT / ".github" / "workflows" / "reusable-link-check.yml"
+        lines = path.read_text().splitlines()
+        steps = [step for step in workflow("reusable-link-check.yml")["jobs"]["link-checker"]["steps"]
+                 if step.get("uses", "").startswith("lycheeverse/lychee-action@")]
+        self.assertEqual(len(steps), 1)
+        sha = steps[0]["uses"].split("@")[1]
+        self.assertIn(sha, declared, "unknown lychee-action pin: add its action.yml inputs here")
+        self.assertEqual(set(steps[0]["with"]) - declared[sha], set())
+        line = next(text for text in lines if sha in text)
+        self.assertTrue(line.rstrip().endswith("# v2.9.0"), line)
+
+    def run_config_step(self, files, config_file=".lychee.toml", args="--verbose './**/*.md'"):
+        job = workflow("reusable-link-check.yml")["jobs"]["link-checker"]
+        step = next(step for step in job["steps"] if step.get("id") == "config")
+        self.assertEqual(step["env"], {"CONFIG_FILE": "${{ inputs.config-file }}",
+                                       "LYCHEE_ARGS": "${{ inputs.args }}"})
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in files:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
+                (root / name).write_text("")
+            output = root / "github-output"
+            result = subprocess.run(
+                ["bash", "-euo", "pipefail", "-c", step["run"]], cwd=root, capture_output=True,
+                text=True, env={**os.environ, "CONFIG_FILE": config_file, "LYCHEE_ARGS": args,
+                                "GITHUB_OUTPUT": str(output)},
+            )
+            written = output.read_text() if output.exists() else ""
+        return result, written
+
+    def test_link_checker_adds_config_only_when_the_file_exists(self):
+        args = "--verbose './**/*.md'"
+        cases = (
+            ((".lychee.toml",), ".lychee.toml", args, f"--config .lychee.toml {args}"),
+            ((), ".lychee.toml", args, args),
+            ((".lychee.toml",), "", args, args),
+            ((".lychee.toml",), ".lychee.toml", "--config other.toml './**/*.md'", "--config other.toml './**/*.md'"),
+            (("ci/lychee.toml",), "ci/lychee.toml", args, f"--config ci/lychee.toml {args}"),
+        )
+        for files, config_file, given, expected in cases:
+            with self.subTest(files=files, config_file=config_file, args=given):
+                result, written = self.run_config_step(files, config_file, given)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(written, f"args<<LYCHEE_ARGS_EOF\n{expected}\nLYCHEE_ARGS_EOF\n")
+
+    def test_link_checker_rejects_config_paths_that_args_would_eval(self):
+        for name in ("a b.toml", "x;touch pwned.toml", "$(id).toml", "-x.toml", "q'.toml"):
+            with self.subTest(name=name):
+                result, written = self.run_config_step((name,), name)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(written, "")
+
+    def test_static_analysis_caller_grants_read_only_contents(self):
+        self.assertEqual(workflow("call-reusable-static-analysis.yml")["permissions"],
+                         {"contents": "read"})
+
+    def test_readme_lists_every_reusable_workflow(self):
+        readme = (ROOT / "README.md").read_text()
+        listed = set(re.findall(r"^- `(reusable-[a-z-]+\.yml)`$", readme, re.MULTILINE))
+        actual = {path.name for path in (ROOT / ".github" / "workflows").glob("reusable-*.yml")}
+        self.assertEqual(listed, actual)
 
     def test_public_suite_discovers_tests_and_cancels_only_superseded_prs(self):
         config = workflow("public-test.yml")
