@@ -18,6 +18,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+# The reusable workflow only reads the checkout; a caller must grant at least this.
+permissions:
+  contents: read
+
 jobs:
   static-analysis:
     # Same-commit relative form, not `@main`: `main` has no

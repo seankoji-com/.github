@@ -30,9 +30,42 @@ jobs:
         with:
           persist-credentials: false
 
+      # lychee-action has no `config` input, so a config file reaches lychee
+      # only as `--config` in `args`. The action eval-expands `args`, so the
+      # path is validated before it is added. A missing file keeps the
+      # caller's args untouched, and so does a `--config` option already in `args`.
+      - name: Resolve lychee config
+        id: config
+        env:
+          CONFIG_FILE: ${{ inputs.config-file }}
+          LYCHEE_ARGS: ${{ inputs.args }}
+        run: |
+          set -euo pipefail
+          args="$LYCHEE_ARGS"
+          if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ] && [[ ! "$LYCHEE_ARGS" =~ (^|[[:space:]])--config([=[:space:]]|$) ]]; then
+            if [[ ! "$CONFIG_FILE" =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]]; then
+              echo "::error::config-file must use only letters, digits, dot, underscore, slash and hyphen, and must not start with a hyphen"
+              exit 1
+            fi
+            args="--config $CONFIG_FILE $LYCHEE_ARGS"
+          else
+            echo "::notice::Not adding --config: the config file is missing or args already set it"
+          fi
+          # Caller-controlled args may span lines, so use a per-run delimiter
+          # and refuse a value that contains it.
+          delimiter="LYCHEE_ARGS_EOF_${RANDOM}${RANDOM}${RANDOM}_$$"
+          if [[ "$args" == *"$delimiter"* ]]; then
+            echo "::error::args contains the output delimiter"
+            exit 1
+          fi
+          {
+            echo "args<<$delimiter"
+            echo "$args"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Run Lychee Link Checker
-        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
-          args: ${{ inputs.args }}
-          config: ${{ inputs.config-file }}
+          args: ${{ steps.config.outputs.args }}
           fail: true
