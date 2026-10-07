@@ -21,6 +21,9 @@ class RecoveryRequestTests(unittest.TestCase):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         # This workflow accepts the App key. Keep every job off persistent
         # runners, including future jobs and reusable-workflow delegations.
+        # This is a deliberately narrow routing policy, not a validator for
+        # all legal runs-on forms. New labels or forms require a trust review;
+        # a custom runner's label alone does not prove GitHub hosts it.
         for name, job in workflow["jobs"].items():
             with self.subTest(job=name):
                 self.assertNotIn("uses", job)
