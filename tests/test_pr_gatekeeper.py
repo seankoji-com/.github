@@ -454,11 +454,8 @@ class TestReviewEventContract(unittest.TestCase):
         self.assertEqual(gate["with"]["seed"], "${{ github.event_name == 'pull_request_target' }}")
         helper = yaml.safe_load((root / ".github/workflows/reusable-review-event.yml").read_text())
         # Pool-wide jobs must neither accept nor reference workflow secrets.
-        self.assertNotIn("secrets", signal)
         for contract in (signal, helper):
-            serialized = yaml.safe_dump(contract)
-            self.assertNotIn("secrets.", serialized)
-            self.assertNotIn("secrets:", serialized)
+            self.assertNotIn("secrets", yaml.safe_dump(contract).casefold())
         self.assertEqual(helper["permissions"], {"contents": "read"})
         self.assertTrue(all("uses" not in step for step in helper["jobs"]["signal"]["steps"]))
         runner_expression = helper["jobs"]["signal"]["runs-on"]
