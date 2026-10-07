@@ -14,7 +14,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
 RUNNER_EXPR = ("${{ github.event.repository.private && "
-               "fromJSON('[\"self-hosted\", \"Linux\", \"carey-mac\"]') || 'ubuntu-latest' }}")
+               "fromJSON('[\"self-hosted\", \"Linux\"]') || 'ubuntu-latest' }}")
 
 
 class RecoveryRequestTests(unittest.TestCase):
