@@ -443,6 +443,8 @@ class TestReviewEventContract(unittest.TestCase):
         self.assertEqual(set(events["pull_request_review"]["types"]), {"submitted", "edited", "dismissed"})
         self.assertEqual(caller["permissions"]["actions"], "read")
         signal = caller["jobs"]["review-event"]
+        self.assertEqual(signal["uses"], "./.github/workflows/reusable-review-event.yml",
+                         "the secrets guard must inspect the helper used by the caller")
         self.assertEqual(signal["permissions"], {"contents": "read"})
         self.assertEqual(signal["if"], "github.event_name == 'pull_request_review'")
         gate = caller["jobs"]["gatekeeper"]
