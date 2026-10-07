@@ -25,8 +25,8 @@ jobs:
     # Private repos run on the self-hosted pool so an exhausted Actions budget
     # cannot stop the signal. Org runner groups do not serve public repos, and
     # hosted minutes are free there, so public repos stay on ubuntu-latest.
-    # The 2026-10-07 stalled review signals showed that these CPU-only jobs
-    # must use the shared Linux pool rather than depend on one host label.
+    # These CPU-only jobs must use the shared Linux pool so a single
+    # unavailable host cannot strand review signals or recovery requests.
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux"]') || 'ubuntu-latest' }} # runner-keep-hosted (public repos only)
     timeout-minutes: 10
     permissions:
