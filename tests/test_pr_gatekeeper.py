@@ -455,21 +455,37 @@ class TestReviewEventContract(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request_target'", gate["if"])
         self.assertEqual(gate["with"]["seed"], "${{ github.event_name == 'pull_request_target' }}")
         helper = yaml.safe_load((root / ".github/workflows/reusable-review-event.yml").read_text())
-        # Pool-wide jobs must neither accept nor reference workflow secrets.
+        # This review-event caller/helper pair must neither accept nor
+        # reference workflow secrets. Other reusables have separate policies.
         for contract in (signal, helper):
             self.assertNotIn("secrets", yaml.safe_dump(contract).casefold())
         self.assertEqual(helper["permissions"], {"contents": "read"})
         self.assertTrue(all("uses" not in step for step in helper["jobs"]["signal"]["steps"]))
-        runner_expression = helper["jobs"]["signal"]["runs-on"]
-        label_json = re.search(r"fromJSON\('([^']+)'\)", runner_expression)
-        self.assertIsNotNone(label_json, "private signals must select a Linux runner pool")
-        self.assertEqual(set(json.loads(label_json.group(1))), {"self-hosted", "Linux"},
-                         "review signals must not pin a host-specific runner")
         # Private repos run on the self-hosted pool (immune to the Actions
         # budget); public repos are not served by any org runner group.
-        self.assertEqual(helper["jobs"]["signal"]["runs-on"],
-                         "${{ github.event.repository.private && "
-                         "fromJSON('[\"self-hosted\", \"Linux\"]') || 'ubuntu-latest' }}")
+        for name, job in helper["jobs"].items():
+            with self.subTest(job=name):
+                self.assertNotIn("uses", job,
+                                 "review signal routing must be inspected locally")
+                runner_expression = job.get("runs-on")
+                self.assertIsInstance(runner_expression, str,
+                                      "review signals require private/public conditional routing")
+                routing = re.fullmatch(
+                    r"\s*\$\{\{\s*github\.event\.repository\.private\s*&&\s*"
+                    r"fromJSON\(\s*'([^']+)'\s*\)\s*\|\|\s*'([^']+)'\s*\}\}\s*",
+                    runner_expression, re.IGNORECASE)
+                self.assertIsNotNone(routing,
+                                     "review signals require a private pool and a literal hosted fallback")
+                try:
+                    labels = json.loads(routing.group(1))
+                except json.JSONDecodeError:
+                    self.fail("private review signal runner labels must be valid JSON")
+                self.assertIsInstance(labels, list,
+                                      "private review signal runner labels must be a JSON list")
+                self.assertEqual(sorted(labels, key=str), ["Linux", "self-hosted"],
+                                 "private review signals must use only the Linux pool labels")
+                self.assertEqual(routing.group(2), "ubuntu-latest",
+                                 "public review signals must use the approved hosted runner")
 
     def test_reusable_gatekeeper_seed_input_contract(self):
         import shutil
