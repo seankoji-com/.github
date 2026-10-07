@@ -17,6 +17,18 @@ WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
 
 
 class RecoveryRequestTests(unittest.TestCase):
+    def test_all_recovery_jobs_use_explicit_hosted_runners(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        # This workflow accepts the App key. Keep every job off persistent
+        # runners, including future jobs and reusable-workflow delegations.
+        for name, job in workflow["jobs"].items():
+            with self.subTest(job=name):
+                self.assertNotIn("uses", job)
+                runner = job.get("runs-on")
+                self.assertIsInstance(runner, str)
+                self.assertRegex(runner, r"\A(?:ubuntu|windows|macos)-(?:latest|[0-9]+(?:\.[0-9]+)*)\Z",
+                                 "recovery jobs must use an explicit GitHub-hosted runner")
+
     def test_caller_uses_only_pr_identity_and_is_advisory(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         caller = yaml.safe_load((ROOT / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
