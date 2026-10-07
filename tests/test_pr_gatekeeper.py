@@ -457,7 +457,7 @@ class TestReviewEventContract(unittest.TestCase):
         # budget); public repos are not served by any org runner group.
         self.assertEqual(helper["jobs"]["signal"]["runs-on"],
                          "${{ github.event.repository.private && "
-                         "fromJSON('[\"self-hosted\", \"Linux\", \"carey-mac\"]') || 'ubuntu-latest' }}")
+                         "fromJSON('[\"self-hosted\", \"Linux\"]') || 'ubuntu-latest' }}")
 
     def test_reusable_gatekeeper_seed_input_contract(self):
         import shutil
