@@ -434,6 +434,8 @@ class TestPendingOverridesTerminal(unittest.TestCase):
 
 class TestReviewEventContract(unittest.TestCase):
     def test_review_events_use_a_read_only_signal_and_trusted_followup(self):
+        import json
+        import re
         import yaml
         root = Path(__file__).resolve().parents[1]
         caller = yaml.safe_load((root / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
@@ -451,8 +453,19 @@ class TestReviewEventContract(unittest.TestCase):
         self.assertIn("github.event_name == 'pull_request_target'", gate["if"])
         self.assertEqual(gate["with"]["seed"], "${{ github.event_name == 'pull_request_target' }}")
         helper = yaml.safe_load((root / ".github/workflows/reusable-review-event.yml").read_text())
+        # Pool-wide jobs must neither accept nor reference workflow secrets.
+        self.assertNotIn("secrets", signal)
+        for contract in (signal, helper):
+            serialized = yaml.safe_dump(contract)
+            self.assertNotIn("secrets.", serialized)
+            self.assertNotIn("secrets:", serialized)
         self.assertEqual(helper["permissions"], {"contents": "read"})
         self.assertTrue(all("uses" not in step for step in helper["jobs"]["signal"]["steps"]))
+        runner_expression = helper["jobs"]["signal"]["runs-on"]
+        label_json = re.search(r"fromJSON\('([^']+)'\)", runner_expression)
+        self.assertIsNotNone(label_json, "private signals must select a Linux runner pool")
+        self.assertEqual(set(json.loads(label_json.group(1))), {"self-hosted", "Linux"},
+                         "review signals must not pin a host-specific runner")
         # Private repos run on the self-hosted pool (immune to the Actions
         # budget); public repos are not served by any org runner group.
         self.assertEqual(helper["jobs"]["signal"]["runs-on"],
