@@ -13,11 +13,24 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
-RUNNER_EXPR = ("${{ github.event.repository.private && "
-               "fromJSON('[\"self-hosted\", \"Linux\", \"carey-mac\"]') || 'ubuntu-latest' }}")
 
 
 class RecoveryRequestTests(unittest.TestCase):
+    def test_all_recovery_jobs_use_explicit_hosted_runners(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        # This workflow accepts the App key. Keep every job off persistent
+        # runners, including future jobs and reusable-workflow delegations.
+        # This is a deliberately narrow routing policy, not a validator for
+        # all legal runs-on forms. New labels or forms require a trust review;
+        # a custom runner's label alone does not prove GitHub hosts it.
+        for name, job in workflow["jobs"].items():
+            with self.subTest(job=name):
+                self.assertNotIn("uses", job)
+                runner = job.get("runs-on")
+                self.assertIsInstance(runner, str)
+                self.assertRegex(runner, r"\A(?:ubuntu|windows|macos)-(?:latest|[0-9]+(?:\.[0-9]+)*)\Z",
+                                 "recovery jobs must use an explicit GitHub-hosted runner")
+
     def test_caller_uses_only_pr_identity_and_is_advisory(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         caller = yaml.safe_load((ROOT / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
@@ -37,9 +50,8 @@ class RecoveryRequestTests(unittest.TestCase):
             "head_sha": "${{ github.event.pull_request.head.sha }}",
         })
         job = workflow["jobs"]["request"]
-        # Private repos use the self-hosted pool; public repos (no org runner
-        # group serves them) stay on free hosted minutes.
-        self.assertEqual(job["runs-on"], RUNNER_EXPR)
+        # The App private key stays off persistent PR execution runners.
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual(job["timeout-minutes"], 10)
         self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
         self.assertFalse(any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"]))
