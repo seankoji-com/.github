@@ -22,10 +22,9 @@ on:
 
 jobs:
   request:
-    # Private repos run on the self-hosted pool so an exhausted Actions budget
-    # cannot stop the signal. Org runner groups do not serve public repos, and
-    # hosted minutes are free there, so public repos stay on ubuntu-latest.
-    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted", "Linux"]') || 'ubuntu-latest' }} # runner-keep-hosted (public repos only)
+    # This job handles an App private key. Use a fresh hosted runner rather
+    # than the persistent pool that also executes pull-request code.
+    runs-on: ubuntu-latest # runner-keep-hosted (App private-key isolation)
     timeout-minutes: 10
     permissions:
       contents: read

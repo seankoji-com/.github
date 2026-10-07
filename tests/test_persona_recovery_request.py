@@ -13,8 +13,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
-RUNNER_EXPR = ("${{ github.event.repository.private && "
-               "fromJSON('[\"self-hosted\", \"Linux\"]') || 'ubuntu-latest' }}")
+
 
 
 class RecoveryRequestTests(unittest.TestCase):
@@ -37,9 +36,8 @@ class RecoveryRequestTests(unittest.TestCase):
             "head_sha": "${{ github.event.pull_request.head.sha }}",
         })
         job = workflow["jobs"]["request"]
-        # Private repos use the self-hosted pool; public repos (no org runner
-        # group serves them) stay on free hosted minutes.
-        self.assertEqual(job["runs-on"], RUNNER_EXPR)
+        # The App private key stays off persistent PR execution runners.
+        self.assertEqual(job["runs-on"], "ubuntu-latest")
         self.assertEqual(job["timeout-minutes"], 10)
         self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
         self.assertFalse(any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"]))
