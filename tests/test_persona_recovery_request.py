@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
 
 
-
 class RecoveryRequestTests(unittest.TestCase):
     def test_all_recovery_jobs_use_explicit_hosted_runners(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())

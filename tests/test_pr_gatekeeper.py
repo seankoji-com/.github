@@ -467,6 +467,8 @@ class TestReviewEventContract(unittest.TestCase):
             with self.subTest(job=name):
                 self.assertNotIn("uses", job,
                                  "review signal routing must be inspected locally")
+                self.assertEqual(job.get("timeout-minutes"), 2,
+                                 "every review signal job must release its runner within two minutes")
                 runner_expression = job.get("runs-on")
                 self.assertIsInstance(runner_expression, str,
                                       "review signals require private/public conditional routing")
