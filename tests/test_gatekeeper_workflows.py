@@ -1,8 +1,10 @@
 """Queued workflows must block before their jobs have check runs."""
 
 import pathlib
+import os
 import shutil
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 import urllib.error
@@ -327,6 +329,28 @@ class WorkflowSyntaxTests(unittest.TestCase):
         result = subprocess.run(args + [str(GATE_CALLER)], cwd=ROOT,
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+
+class CoalescedRefreshTests(unittest.TestCase):
+    def test_refresh_is_opt_in_and_runs_after_event_failure_only_with_staged_code(self):
+        config = yaml.safe_load((WORKFLOWS / "reusable-pr-gatekeeper.yml").read_text())
+        self.assertEqual(config[True]["workflow_call"]["inputs"]["reconcile_open"], {
+            "description": "Refresh every open PR after handling the triggering event. Required for a bounded caller queue.",
+            "type": "boolean", "default": False,
+        })
+        steps = config["jobs"]["all-checks-passed"]["steps"]
+        self.assertEqual(steps[0]["id"], "evaluator")
+        refresh = steps[-1]
+        self.assertEqual(refresh["if"], "${{ always() && inputs.reconcile_open && steps.evaluator.outcome == 'success' }}")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / "pr-gatekeeper.py").write_text(
+                "import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+            result = subprocess.run(["bash", "-eu", "-c", refresh["run"]],
+                                    env={**os.environ, "RUNNER_TEMP": directory,
+                                         "GITHUB_REPOSITORY": "org/repo"},
+                                    capture_output=True, text=True, check=True)
+        self.assertEqual(result.stdout.strip(), '["--repo", "org/repo", "--reconcile-open"]')
 
 
 if __name__ == "__main__":

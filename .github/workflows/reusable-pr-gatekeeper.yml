@@ -30,6 +30,10 @@ on:
         description: 'Post an in-progress seed check and exit without evaluating.'
         type: boolean
         default: false
+      reconcile_open:
+        description: 'Refresh every open PR after handling the triggering event. Required for a bounded caller queue.'
+        type: boolean
+        default: false
       persona_state:
         description: 'Private controller signal for the Grumpy review job.'
         type: string
@@ -50,6 +54,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Stage the evaluator
+        id: evaluator
         env:
           JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
@@ -102,3 +107,16 @@ jobs:
           python3 "${RUNNER_TEMP}/pr-gatekeeper.py" \
             --repo "${GITHUB_REPOSITORY}" \
             --sha "${HEAD_SHA}" "${args[@]}"
+
+      # A bounded caller queue replaces pending events. Read every current PR
+      # so replacing an event for another head cannot leave its gate stale.
+      # Keep the original event path for seeds and exact-head persona signals;
+      # reconciliation retains their persisted state and reads current reviews.
+      - name: Refresh all open PR gates
+        if: ${{ always() && inputs.reconcile_open && steps.evaluator.outcome == 'success' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PERSONA_REVIEW_REQUIRED: ${{ vars.PERSONA_REVIEW_REQUIRED }}
+        run: |
+          python3 "${RUNNER_TEMP}/pr-gatekeeper.py" \
+            --repo "${GITHUB_REPOSITORY}" --reconcile-open

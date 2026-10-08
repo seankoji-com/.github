@@ -89,15 +89,13 @@ jobs:
     uses: ./.github/workflows/reusable-review-event.yml
 
   gatekeeper:
-    # Head, merge, and review-event evaluations publish to overlapping commits.
-    # Serialize repository-wide so an older approval cannot overtake a dismissal.
-    # queue:max preserves completion events when several PRs finish together.
-    # Only gate writers enter this queue. Skipped workflow events and independent
-    # recovery/review signals must not occupy the bounded writer queue.
+    # Keep overlapping head/merge publications serialized, but retain only one
+    # pending refresh. Each surviving job reconciles EVERY open PR from current
+    # state, so replaced events cannot strand another PR behind an old verdict.
+    # Recovery and review signals stay outside this writer queue.
     concurrency:
       group: pr-gatekeeper-${{ github.repository }}
       cancel-in-progress: false
-      queue: max
     # Guarding at the job level, not inside a step: an in-job early exit still
     # claims a self-hosted runner first, and fleet capacity is scarce.
     #   - Skipping the gate's own runs stops it re-triggering itself, which
@@ -117,6 +115,7 @@ jobs:
       head_sha: ${{ github.event.workflow_run.pull_requests[0].head.sha || github.event.workflow_run.head_sha || github.event.pull_request.head.sha || inputs.head_sha }}
       review_run_id: ${{ github.event.workflow_run.event == 'pull_request_review' && format('{0}', github.event.workflow_run.id) || '' }}
       runner-json: '["ubuntu-latest"]'
+      reconcile_open: true
       seed: ${{ github.event_name == 'pull_request_target' }}
       persona_state: ${{ inputs.persona_state || '' }}
       persona_pr: ${{ inputs.persona_pr || '' }}

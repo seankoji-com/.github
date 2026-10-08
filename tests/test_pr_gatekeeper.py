@@ -304,6 +304,26 @@ class TestRecovery(unittest.TestCase):
             self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 2)
             self.assertEqual(report.call_count, 2)
 
+    def test_coalesced_refresh_updates_other_prs_and_current_heads(self):
+        # The pending event may have been for an entirely different PR or an
+        # obsolete head. Every surviving refresh must discover current heads.
+        prs = [{"head": {"sha": sha}} for sha in ("new-a", "b", "c")]
+        inventories = [
+            ([run("build", conclusion="failure")], EMPTY_STATUSES, []),
+            ([run("build", status="queued", conclusion=None)], EMPTY_STATUSES, []),
+            ([run("build")], EMPTY_STATUSES, []),
+        ]
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "_get", return_value=prs), \
+             patch.object(pr_gatekeeper, "collect", side_effect=inventories), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+        bodies = {call.args[2]["head_sha"]: call.args[2] for call in post.call_args_list}
+        self.assertEqual(set(bodies), {"new-a", "b", "c"})
+        self.assertEqual(bodies["new-a"]["conclusion"], "failure")
+        self.assertEqual(bodies["b"]["status"], "in_progress")
+        self.assertEqual(bodies["c"]["conclusion"], "success")
+
 
 class TestCommitStatuses(unittest.TestCase):
     def test_total_count_zero_is_not_pending(self):
@@ -398,8 +418,8 @@ class TestPendingOverridesTerminal(unittest.TestCase):
     evaluation time is genuinely outstanding. Suppressing the in_progress to
     protect an earlier `completed` gate would let a PR merge while that check is
     still in flight, and its later failure would land after the merge. The
-    caller's `queue: max` is what fixes the original frozen-gate bug; no
-    monotonic guard belongs here.
+    The caller coalesces pending events into a refresh of every open PR;
+    no monotonic guard belongs here.
     """
 
     def test_in_progress_posts_over_an_earlier_completed_gate(self):
@@ -866,7 +886,8 @@ class TestReviewEventResolution(unittest.TestCase):
         self.assertNotIn("concurrency", caller)
         self.assertEqual(caller["jobs"]["gatekeeper"]["concurrency"],
                          {"group": "pr-gatekeeper-${{ github.repository }}",
-                          "cancel-in-progress": False, "queue": "max"})
+                          "cancel-in-progress": False})
+        self.assertTrue(caller["jobs"]["gatekeeper"]["with"]["reconcile_open"])
         for signal in ("recover-persona", "review-event"):
             self.assertIn(signal, caller["jobs"])
         holders = {name for name, job in caller["jobs"].items() if "concurrency" in job}
