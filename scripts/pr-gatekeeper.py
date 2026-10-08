@@ -671,7 +671,6 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             # both refs current so a dismissed review cannot leave one green.
             publish_refs.update(c[key] for c in persona_checks
                                 for key in ("head_sha", "merge_sha") if c.get(key))
-        refs_complete = True
         runs, statuses, suites = collect(repo, sha, token)
         # Reconciliation can run before CI has even registered on a new head.
         # Our own seed/advisory checks are not evidence that CI ran. Keep each

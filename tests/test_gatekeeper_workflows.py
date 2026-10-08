@@ -92,7 +92,7 @@ class WorkflowInventoryTests(unittest.TestCase):
         with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "false"}), \
              patch.object(pr_gatekeeper, "collect", return_value=(checks, EMPTY_STATUSES, [])), \
              patch.object(pr_gatekeeper, "_post") as post:
-            self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token"), 0)
+            self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token", open_prs=[{"head": {"sha": "head"}}]), 0)
         summary = post.call_args.args[2]["output"]["summary"]
         self.assertLessEqual(len(summary.encode("utf-8")), 60000)
         self.assertIn("Additional details omitted", summary)
@@ -351,6 +351,41 @@ class CoalescedRefreshTests(unittest.TestCase):
                                          "GITHUB_REPOSITORY": "org/repo"},
                                     capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), '["--repo", "org/repo", "--reconcile-open"]')
+
+
+    def test_unrelated_completions_cannot_replace_pr_refreshes(self):
+        import json
+        from types import SimpleNamespace
+
+        # Evaluate the rendered admission expression against concrete events,
+        # including runs that the downstream gatekeeper job will skip.
+        cases = [
+            ("workflow_run", "pull_request", "CI", False, True),
+            ("workflow_run", "dynamic", "CI", False, True),
+            ("workflow_run", "push", "CI", True, True),
+            ("workflow_run", "push", "CI", False, False),
+            ("workflow_run", "schedule", "Maintenance", False, False),
+            ("workflow_run", "pull_request", "PR Gatekeeper", True, False),
+            ("workflow_run", "pull_request_review", "PR Gatekeeper", True, False),
+            ("pull_request_target", "", "", False, False),
+            ("workflow_dispatch", "", "", False, False),
+        ]
+        for visibility in ("public",):
+            caller = yaml.safe_load(GATE_CALLER.read_text())
+            expression = caller["concurrency"]["group"][3:-2].strip()
+            expression = expression.replace("&&", " and ").replace("||", " or ").replace("null", "None")
+            for event, upstream, name, attached, coalesces in cases:
+                with self.subTest(visibility=visibility, event=event, upstream=upstream, name=name, attached=attached):
+                    github = SimpleNamespace(event_name=event, repository="org/repo", run_id="42",
+                        event=SimpleNamespace(workflow_run=SimpleNamespace(event=upstream, name=name,
+                            pull_requests=[{}] if attached else [None])))
+                    actual = eval(expression, {"__builtins__": {}}, {
+                        "github": github, "fromJSON": json.loads,
+                        "contains": lambda values, value: value in values,
+                        "format": lambda pattern, value: pattern.format(value),
+                    })
+                    expected = "pr-gatekeeper-refresh-org/repo" if coalesces else "pr-gatekeeper-event-42"
+                    self.assertEqual(actual, expected)
 
 
 if __name__ == "__main__":
