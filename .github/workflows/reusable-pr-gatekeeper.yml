@@ -81,6 +81,7 @@ jobs:
           SEED: ${{ inputs.seed }}
           PERSONA_STATE: ${{ inputs.persona_state }}
           PERSONA_PR: ${{ inputs.persona_pr }}
+          REQUIRE_CI: ${{ inputs.reconcile_open }}
         run: |
           # review_run_id is caller-supplied public API and --review-run is
           # type=int: any non-integer would kill the step on argparse's usage
@@ -88,6 +89,7 @@ jobs:
           # Guard the shape (as JOB_WORKFLOW_SHA does above) and fall back to
           # plain --sha evaluation so a bad value cannot suppress the check.
           args=()
+          if [ "${REQUIRE_CI:-false}" = "true" ]; then args+=(--require-ci); fi
           if [ -n "$REVIEW_RUN_ID" ]; then
             # Match the whole string, not one line of it: a multiline value
             # such as $'123\ninvalid' would satisfy a per-line grep and still
@@ -113,7 +115,7 @@ jobs:
       # Keep the original event path for seeds and exact-head persona signals;
       # reconciliation retains their persisted state and reads current reviews.
       - name: Refresh all open PR gates
-        if: ${{ always() && inputs.reconcile_open && steps.evaluator.outcome == 'success' }}
+        if: ${{ always() && inputs.reconcile_open && !inputs.seed && steps.evaluator.outcome == 'success' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PERSONA_REVIEW_REQUIRED: ${{ vars.PERSONA_REVIEW_REQUIRED }}

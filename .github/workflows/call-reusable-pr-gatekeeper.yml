@@ -57,6 +57,12 @@ permissions:
   pull-requests: read
   contents: read
 
+# Coalesce routine CI completions before they enter the serialized writer queue.
+# Seeds, controller signals and fork review resolution retain their own run IDs.
+concurrency:
+  group: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event != 'pull_request_review' && format('pr-gatekeeper-refresh-{0}', github.repository) || format('pr-gatekeeper-event-{0}', github.run_id) }}
+  cancel-in-progress: false
+
 jobs:
   recover-persona:
     # An independent event path; the reusable sends only PR identity to the
@@ -89,13 +95,12 @@ jobs:
     uses: ./.github/workflows/reusable-review-event.yml
 
   gatekeeper:
-    # Keep overlapping head/merge publications serialized, but retain only one
-    # pending refresh. Each surviving job reconciles EVERY open PR from current
-    # state, so replaced events cannot strand another PR behind an old verdict.
-    # Recovery and review signals stay outside this writer queue.
+    # Serialize every head/merge publication. Routine CI arrivals are bounded
+    # above; keep event payloads in this queue until their signals are published.
     concurrency:
       group: pr-gatekeeper-${{ github.repository }}
       cancel-in-progress: false
+      queue: max
     # Guarding at the job level, not inside a step: an in-job early exit still
     # claims a self-hosted runner first, and fleet capacity is scarce.
     #   - Skipping the gate's own runs stops it re-triggering itself, which

@@ -341,7 +341,7 @@ class CoalescedRefreshTests(unittest.TestCase):
         steps = config["jobs"]["all-checks-passed"]["steps"]
         self.assertEqual(steps[0]["id"], "evaluator")
         refresh = steps[-1]
-        self.assertEqual(refresh["if"], "${{ always() && inputs.reconcile_open && steps.evaluator.outcome == 'success' }}")
+        self.assertEqual(refresh["if"], "${{ always() && inputs.reconcile_open && !inputs.seed && steps.evaluator.outcome == 'success' }}")
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "pr-gatekeeper.py").write_text(
