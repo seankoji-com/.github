@@ -357,6 +357,32 @@ class TestRecovery(unittest.TestCase):
         self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, set(inventories))
         self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
 
+    def test_merge_only_ci_can_complete_reconciliation_with_empty_head(self):
+        prs = [{"head": {"sha": "head"}, "merge_commit_sha": "merge"}]
+        inventories = {"head": ([], EMPTY_STATUSES, []),
+                       "merge": ([run("merge build")], EMPTY_STATUSES, [])}
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "_get", return_value=prs), \
+             patch.object(pr_gatekeeper, "collect", side_effect=lambda repo, sha, token: inventories[sha]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+        self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, set(inventories))
+        self.assertTrue(all(c.args[2]["conclusion"] == "success" for c in post.call_args_list))
+
+    def test_legacy_single_sha_evaluates_without_claiming_complete_pr_metadata(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([run("build")], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get") as get, \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("demo/repo", "head", "fake"), 0)
+        get.assert_not_called()
+        post.assert_called_once()
+        body = post.call_args.args[2]
+        self.assertEqual((body["head_sha"], body["conclusion"]), ("head", "success"))
+        self.assertIn(pr_gatekeeper.EVALUATED_MARKER, body["output"]["summary"])
+        self.assertIn('<!-- gatekeeper-refs:["head"] -->', body["output"]["summary"])
+        self.assertNotIn("<!-- gatekeeper-refs-complete -->", body["output"]["summary"])
+
     def test_event_evaluation_cannot_publish_green_before_refresh(self):
         prs = [{"head": {"sha": "new"}, "merge_commit_sha": "merge"}]
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "false"}), \

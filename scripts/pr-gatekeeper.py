@@ -647,7 +647,7 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         return publish(repo, {sha}, token, "in_progress", None, title, summary, dry_run)
 
     publish_refs = {sha}
-    refs_complete = False
+    refs_complete = False  # A supplied SHA alone does not resolve PR destinations.
     result = 0
     awaiting_ci = False
     try:
@@ -668,10 +668,10 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             if persona_required:
                 persona_checks = collect_persona_checks(repo, sha, token, prs)
         runs, statuses, suites = collect(repo, sha, token)
-        # Reconciliation can run before CI has even registered on a new head.
-        # Our own seed/advisory checks are not evidence that CI ran. Keep each
-        # empty PR pending, even on repeated refreshes, until actual
-        # checks or statuses exist. Legacy single-target evaluation is unchanged.
+        # CI registration is per shared PR head, not per destination SHA.
+        # Head-only and merge-only CI are valid; require one real inventory,
+        # then evaluate every registered inventory. Empty across all refs stays
+        # pending; our seed/advisory checks do not establish CI registration.
         def has_ci(checks, commit_statuses):
             return bool(dedupe_check_runs(checks) or int((commit_statuses or {}).get("total_count") or 0))
 
