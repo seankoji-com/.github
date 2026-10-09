@@ -969,5 +969,19 @@ class TestReviewEventResolution(unittest.TestCase):
             self.assertEqual(len(post.call_args_list), 2)
             self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
 
+class TestPublication(unittest.TestCase):
+    def test_failed_destination_does_not_skip_remaining_destinations(self):
+        for status, conclusion in (("in_progress", None), ("completed", "failure")):
+            with self.subTest(status=status), \
+                 patch.object(pr_gatekeeper, "_post", side_effect=[urllib.error.URLError("offline"), {}]) as post, \
+                 patch("sys.stderr"):
+                self.assertEqual(pr_gatekeeper.publish("org/repo", {"a", "b"}, "token",
+                                 status, conclusion, "title", "summary", False), 2)
+                self.assertEqual([c.args[2]["head_sha"] for c in post.call_args_list], ["a", "b"])
+                for call in post.call_args_list:
+                    self.assertEqual(call.args[2]["status"], status)
+                    self.assertEqual("conclusion" in call.args[2], status == "completed")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

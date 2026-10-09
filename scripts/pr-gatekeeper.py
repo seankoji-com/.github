@@ -429,11 +429,12 @@ def persona_marker(number: int, verdict: tuple[str, str | None]) -> str:
     return f"<!-- grumpy-review:{number}:{verdict[0]}:{verdict[1] or 'waiting'} -->"
 
 
-def _list_all(path: str, token: str) -> list[dict]:
+def _list_all(path: str, token: str, key: str = "") -> list[dict]:
     items, page = [], 1
     separator = "&" if "?" in path else "?"
     while True:
         batch = _get(f"{path}{separator}per_page=100&page={page}", token)
+        batch = _batch(batch, key) if key else batch
         if not isinstance(batch, list) or not all(isinstance(i, dict) for i in batch):
             raise ValueError("invalid paginated list response")
         items.extend(batch)
@@ -560,26 +561,21 @@ def resolve_review_heads(repo: str, run_id: int, token: str) -> list[str]:
 
 def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
     """Recover destinations from our last gate if PR metadata is unavailable."""
-    refs, page = set(), 1
-    while True:
-        payload = _get(f"/repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100&page={page}", token)
-        batch = _batch(payload, "check_runs")
-        for check in batch:
-            if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != GATE_APP_ID:
-                continue
-            summary = (check.get("output") or {}).get("summary") or ""
-            if "<!-- gatekeeper-refs-complete -->" not in summary:
-                continue
-            match = re.search(r"<!-- gatekeeper-refs:(\[.*?\]) -->", summary)
-            if not match:
-                continue
-            previous = json.loads(match[1])
-            if not isinstance(previous, list) or not all(isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref) for ref in previous):
-                raise ValueError("invalid previous gate destinations")
-            refs.update(previous)
-        if len(batch) < 100:
-            return refs
-        page += 1
+    refs = set()
+    for check in _list_all(f"/repos/{repo}/commits/{sha}/check-runs?filter=all", token, "check_runs"):
+        if check.get("name") != GATE_CHECK_NAME or (check.get("app") or {}).get("id") != GATE_APP_ID:
+            continue
+        summary = (check.get("output") or {}).get("summary") or ""
+        if "<!-- gatekeeper-refs-complete -->" not in summary:
+            continue
+        match = re.search(r"<!-- gatekeeper-refs:(\[.*?\]) -->", summary)
+        if not match:
+            continue
+        previous = json.loads(match[1])
+        if not isinstance(previous, list) or not all(isinstance(ref, str) and re.fullmatch(r"[0-9a-f]{40}", ref) for ref in previous):
+            raise ValueError("invalid previous gate destinations")
+        refs.update(previous)
+    return refs
 
 
 def has_evaluated_gate(repo: str, sha: str, token: str) -> bool:
@@ -615,6 +611,24 @@ def has_evaluated_gate(repo: str, sha: str, token: str) -> bool:
         page += 1
 
 
+def publish(repo, refs, token, status, conclusion, title, summary, dry_run, result=0):
+    """Publish the same seed or verdict to every destination, retaining failures."""
+    print(f"{status} / {conclusion or '-'}: {title}")
+    if dry_run:
+        return 0
+    body = {"name": GATE_CHECK_NAME, "status": status,
+            "output": {"title": title, "summary": summary}}
+    if status == "completed":
+        body["conclusion"] = conclusion
+    for ref in sorted(refs):
+        try:
+            _post(f"/repos/{repo}/check-runs", token, dict(body, head_sha=ref))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            print(f"::error::could not post the gate check run for {ref}: {exc}", file=sys.stderr)
+            result = 2
+    return result
+
+
 def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | None = None,
            seed: bool = False, persona_state: str = "", persona_pr: int = 0,
            open_prs: list[dict] | None = None, require_ci: bool = False) -> int:
@@ -630,21 +644,7 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             f'<!-- gatekeeper-refs:{json.dumps([sha])} -->\n'
             "<!-- gatekeeper-refs-complete -->"
         )
-        print(f"in_progress / -: {title}")
-        if dry_run:
-            return 0
-        body = {
-            "name": GATE_CHECK_NAME,
-            "head_sha": sha,
-            "status": "in_progress",
-            "output": {"title": title, "summary": summary},
-        }
-        try:
-            _post(f"/repos/{repo}/check-runs", token, body)
-            return 0
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            print(f"::error::could not post the gate check run for {sha}: {exc}", file=sys.stderr)
-            return 2
+        return publish(repo, {sha}, token, "in_progress", None, title, summary, dry_run)
 
     publish_refs = {sha}
     refs_complete = False
@@ -667,10 +667,6 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             refs_complete = True
             if persona_required:
                 persona_checks = collect_persona_checks(repo, sha, token, prs)
-            # GitHub may prefer checks on its synthetic merge commit. Keep
-            # both refs current so a dismissed review cannot leave one green.
-            publish_refs.update(c[key] for c in persona_checks
-                                for key in ("head_sha", "merge_sha") if c.get(key))
         runs, statuses, suites = collect(repo, sha, token)
         # Reconciliation can run before CI has even registered on a new head.
         # Our own seed/advisory checks are not evidence that CI ran. Keep each
@@ -746,20 +742,7 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             summary = summary.encode("utf-8")[:max(0, budget - len(notice))].decode("utf-8", errors="ignore") + notice
             summary = summary.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
         summary += footer
-    print(f"{status} / {conclusion or '-'}: {title}")
-    if dry_run:
-        return 0
-    body = {"name": GATE_CHECK_NAME, "head_sha": sha, "status": status,
-            "output": {"title": title, "summary": summary}}
-    if status == "completed":
-        body["conclusion"] = conclusion
-    for ref in sorted(publish_refs):
-        try:
-            _post(f"/repos/{repo}/check-runs", token, dict(body, head_sha=ref))
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            print(f"::error::could not post the gate check run for {ref}: {exc}", file=sys.stderr)
-            result = 2
-    return result
+    return publish(repo, publish_refs, token, status, conclusion, title, summary, dry_run, result)
 
 
 def main(argv: list[str]) -> int:
