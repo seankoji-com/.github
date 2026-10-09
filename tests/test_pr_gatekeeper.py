@@ -304,6 +304,95 @@ class TestRecovery(unittest.TestCase):
             self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 2)
             self.assertEqual(report.call_count, 2)
 
+    def test_coalesced_refresh_updates_other_prs_and_current_heads(self):
+        # The pending event may have been for an entirely different PR or an
+        # obsolete head. Every surviving refresh must discover current heads.
+        prs = [{"head": {"sha": sha}} for sha in ("new-a", "b", "c")]
+        inventories = {
+            "new-a": ([run("build", conclusion="failure")], EMPTY_STATUSES, []),
+            "b": ([run("build", status="queued", conclusion=None)], EMPTY_STATUSES, []),
+            "c": ([run("build")], EMPTY_STATUSES, []),
+        }
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "_get", return_value=prs), \
+             patch.object(pr_gatekeeper, "collect", side_effect=lambda repo, sha, token: inventories[sha]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+        bodies = {call.args[2]["head_sha"]: call.args[2] for call in post.call_args_list}
+        self.assertEqual(set(bodies), {"new-a", "b", "c"})
+        self.assertEqual(bodies["new-a"]["conclusion"], "failure")
+        self.assertEqual(bodies["b"]["status"], "in_progress")
+        self.assertEqual(bodies["c"]["conclusion"], "success")
+
+    def test_empty_reconciliation_stays_pending_until_ci_registers(self):
+        prs = [{"head": {"sha": "new"}, "merge_commit_sha": "merge"}]
+        seed = run(pr_gatekeeper.GATE_CHECK_NAME, status="in_progress", conclusion=None)
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "_get", return_value=prs), \
+             patch.object(pr_gatekeeper, "collect", return_value=([seed], EMPTY_STATUSES, [])) as collect, \
+             patch.object(pr_gatekeeper, "_post") as post:
+            for _ in range(2):
+                self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+                self.assertTrue(all(c.args[2]["status"] == "in_progress" for c in post.call_args_list))
+                self.assertTrue(all(c.args[2]["output"]["title"] == "Gate seeded, awaiting CI" for c in post.call_args_list))
+                self.assertTrue(all(pr_gatekeeper.EVALUATED_MARKER not in c.args[2]["output"]["summary"] for c in post.call_args_list))
+            collect.side_effect = [([run("build")], EMPTY_STATUSES, []), ([], EMPTY_STATUSES, [])]
+            post.reset_mock()
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+            self.assertTrue(all(c.args[2]["conclusion"] == "success" for c in post.call_args_list))
+
+    def test_merge_failure_blocks_shared_heads_without_persona_reviews(self):
+        prs = [{"head": {"sha": "head"}, "merge_commit_sha": merge} for merge in ("merge-a", "merge-b")]
+        inventories = {
+            "head": ([run("head build")], EMPTY_STATUSES, []),
+            "merge-a": ([run("merge build", conclusion="failure")], EMPTY_STATUSES, []),
+            "merge-b": ([], EMPTY_STATUSES, []),
+        }
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "_get", return_value=prs), \
+             patch.object(pr_gatekeeper, "collect", side_effect=lambda repo, sha, token: inventories[sha]) as collect, \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+        self.assertEqual(collect.call_count, 3)
+        self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, set(inventories))
+        self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_merge_only_ci_can_complete_reconciliation_with_empty_head(self):
+        prs = [{"head": {"sha": "head"}, "merge_commit_sha": "merge"}]
+        inventories = {"head": ([], EMPTY_STATUSES, []),
+                       "merge": ([run("merge build")], EMPTY_STATUSES, [])}
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "_get", return_value=prs), \
+             patch.object(pr_gatekeeper, "collect", side_effect=lambda repo, sha, token: inventories[sha]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--reconcile-open"]), 0)
+        self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, set(inventories))
+        self.assertTrue(all(c.args[2]["conclusion"] == "success" for c in post.call_args_list))
+
+    def test_legacy_single_sha_evaluates_without_claiming_complete_pr_metadata(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([run("build")], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get") as get, \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("demo/repo", "head", "fake"), 0)
+        get.assert_not_called()
+        post.assert_called_once()
+        body = post.call_args.args[2]
+        self.assertEqual((body["head_sha"], body["conclusion"]), ("head", "success"))
+        self.assertIn(pr_gatekeeper.EVALUATED_MARKER, body["output"]["summary"])
+        self.assertIn('<!-- gatekeeper-refs:["head"] -->', body["output"]["summary"])
+        self.assertNotIn("<!-- gatekeeper-refs-complete -->", body["output"]["summary"])
+
+    def test_event_evaluation_cannot_publish_green_before_refresh(self):
+        prs = [{"head": {"sha": "new"}, "merge_commit_sha": "merge"}]
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "false"}), \
+             patch.object(pr_gatekeeper, "_get", return_value=prs), \
+             patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "demo/repo", "--sha", "new", "--require-ci"]), 0)
+        self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"new", "merge"})
+        self.assertTrue(all(c.args[2]["status"] == "in_progress" for c in post.call_args_list))
+
 
 class TestCommitStatuses(unittest.TestCase):
     def test_total_count_zero_is_not_pending(self):
@@ -398,8 +487,8 @@ class TestPendingOverridesTerminal(unittest.TestCase):
     evaluation time is genuinely outstanding. Suppressing the in_progress to
     protect an earlier `completed` gate would let a PR merge while that check is
     still in flight, and its later failure would land after the merge. The
-    caller's `queue: max` is what fixes the original frozen-gate bug; no
-    monotonic guard belongs here.
+    The caller coalesces pending events into a refresh of every open PR;
+    no monotonic guard belongs here.
     """
 
     def test_in_progress_posts_over_an_earlier_completed_gate(self):
@@ -580,7 +669,7 @@ class TestSeed(unittest.TestCase):
              patch.object(pr_gatekeeper, "report", return_value=0) as report_mock:
             rc = pr_gatekeeper.main(["--repo", "demo/repo", "--sha", "abc", "--seed"])
             self.assertEqual(rc, 0)
-            report_mock.assert_called_once_with("demo/repo", "abc", "fake", False, seed=True)
+            report_mock.assert_called_once_with("demo/repo", "abc", "fake", False, seed=True, require_ci=False)
 
     def test_main_seed_mutually_exclusive_with_reconcile(self):
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
@@ -767,7 +856,7 @@ class TestPersonaReview(unittest.TestCase):
             self.assertEqual(pr_gatekeeper.main(base + ["--persona-state", "running",
                                                       "--persona-pr", "42"]), report_mock.return_value)
             report_mock.assert_called_once_with("org/repo", "a" * 40, "fake", False,
-                                                persona_state="running", persona_pr=42)
+                                                persona_state="running", persona_pr=42, require_ci=False)
 
 
 class TestReviewEventResolution(unittest.TestCase):
@@ -863,10 +952,11 @@ class TestReviewEventResolution(unittest.TestCase):
         import yaml
         root = Path(__file__).resolve().parent.parent
         caller = yaml.safe_load((root / ".github/workflows/call-reusable-pr-gatekeeper.yml").read_text())
-        self.assertNotIn("concurrency", caller)
+        self.assertIn("concurrency", caller)
         self.assertEqual(caller["jobs"]["gatekeeper"]["concurrency"],
                          {"group": "pr-gatekeeper-${{ github.repository }}",
                           "cancel-in-progress": False, "queue": "max"})
+        self.assertTrue(caller["jobs"]["gatekeeper"]["with"]["reconcile_open"])
         for signal in ("recover-persona", "review-event"):
             self.assertIn(signal, caller["jobs"])
         holders = {name for name, job in caller["jobs"].items() if "concurrency" in job}
@@ -904,6 +994,20 @@ class TestReviewEventResolution(unittest.TestCase):
             pr_gatekeeper.report("org/repo", "head", "token")
             self.assertEqual(len(post.call_args_list), 2)
             self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+class TestPublication(unittest.TestCase):
+    def test_failed_destination_does_not_skip_remaining_destinations(self):
+        for status, conclusion in (("in_progress", None), ("completed", "failure")):
+            with self.subTest(status=status), \
+                 patch.object(pr_gatekeeper, "_post", side_effect=[urllib.error.URLError("offline"), {}]) as post, \
+                 patch("sys.stderr"):
+                self.assertEqual(pr_gatekeeper.publish("org/repo", {"a", "b"}, "token",
+                                 status, conclusion, "title", "summary", False), 2)
+                self.assertEqual([c.args[2]["head_sha"] for c in post.call_args_list], ["a", "b"])
+                for call in post.call_args_list:
+                    self.assertEqual(call.args[2]["status"], status)
+                    self.assertEqual("conclusion" in call.args[2], status == "completed")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
