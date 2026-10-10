@@ -144,7 +144,7 @@ jobs:
         # Non-gating. An artifact-service failure must not fail the scan job;
         # findings are already in the step summary.
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: semgrep-results
           path: ${{ steps.python.outputs.result }}
@@ -256,7 +256,7 @@ jobs:
         if: always() && steps.install.outcome == 'success' && (steps.scan.outcome == 'success' || steps.scan.outcome == 'failure') && steps.python.outputs.result != ''
         # Non-gating. Findings are already in the step summary above.
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: zizmor-results
           path: ${{ steps.python.outputs.result }}
