@@ -336,8 +336,19 @@ class UpdaterWorkflowTests(unittest.TestCase):
     def test_write_permissions_belong_to_the_job_that_runs_no_scanner(self):
         self.assertEqual(self.doc["permissions"], {})
         self.assertEqual(self.resolve["permissions"], {"contents": "read"})
-        self.assertEqual(self.publish["permissions"],
-                         {"contents": "write", "pull-requests": "write", "actions": "write"})
+        # GITHUB_TOKEN cannot carry `workflows`, and the pins this job pushes
+        # live in workflow files, so a push with GITHUB_TOKEN is refused (run
+        # 38229516764). The write identity is the org App, minted in this job.
+        self.assertEqual(self.publish["permissions"], {"contents": "read"})
+        self.assertNotIn("github.token", json.dumps(self.publish))
+        mint = next(s for s in self.publish["steps"] if s.get("id") == "app-token")
+        self.assertEqual(mint["uses"].split("@")[0], "actions/create-github-app-token")
+        self.assertEqual(mint["with"]["private-key"], "${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}")
+        writers = [s for s in self.publish["steps"]
+                   if "git push" in s.get("run", "") or "gh pr" in s.get("run", "")]
+        self.assertTrue(writers)
+        for step in writers:
+            self.assertEqual(step["env"]["GH_TOKEN"], "${{ steps.app-token.outputs.token }}")
         publish_source = "\n".join(s.get("run", "") for s in self.publish["steps"])
         for installer in ("pip install", "venv", "semgrep", "zizmor"):
             self.assertNotIn(installer, publish_source)
