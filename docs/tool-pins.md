@@ -44,25 +44,74 @@ as two jobs, so freshly released scanner code never runs beside a write token:
    failures as advisory, so this is the only gate.
 5. A JSON report of the bumps is uploaded.
 
-**`publish`** (write access, runs no scanner)
+**`publish`** (writes with the org App token, runs no scanner)
 
 6. `--apply-report` re-validates every entry (a known pin, a plain version or
    digest, the old value still current) and rewrites only those lines.
 7. It force-pushes `automation/tool-pins` when the content differs from the
    branch, opens or updates one PR, and dispatches `public-test.yml` on the
-   branch.
+   branch. Every one of those writes authenticates with the org App token minted
+   in the job, never with `GITHUB_TOKEN`.
 
 If a tool could not be resolved, the other bumps are still published for a new
 PR, an already open PR is left as it is, nothing is closed, and the job fails so
 the error is visible.
 
-Do not push to `automation/tool-pins`. If its PR shows no checks, close and
-reopen it: events created by `GITHUB_TOKEN` do not trigger `pull_request`
-workflows.
+Do not push to `automation/tool-pins`. The PR is opened with the App token, not
+`GITHUB_TOKEN`, so its events do trigger `pull_request` workflows; the job also
+dispatches `public-test.yml` explicitly so the PR carries results even when the
+gate check is missing.
+
+### Why the App token and not `GITHUB_TOKEN`
+
+The pins this job rewrites live inside `.github/workflows/`, so pushing them
+needs the `workflows` permission. `GITHUB_TOKEN` can never hold it — there is no
+`workflows` key in a `permissions:` block — so the push is refused outright:
+
+```
+! [remote rejected] automation/tool-pins -> automation/tool-pins (refusing to
+allow a GitHub App to create or update workflow
+`.github/workflows/reusable-static-analysis.yml` without `workflows` permission)
+```
+
+The job therefore mints `seankoji-com-ci` (`SEANKOJI_CI_APP_ID` /
+`SEANKOJI_CI_PRIVATE_KEY`) and hands it to `gh` and `git push`. Its own
+`GITHUB_TOKEN` keeps `contents: read`, for the checkout only.
+
+### Required App permissions
+
+`seankoji-com-ci` is installed org-wide with `All repositories`. Its granted
+permissions are readable without the private key:
+
+```sh
+gh api /orgs/seankoji-com/installations \
+  --jq '.installations[] | select(.app_slug=="seankoji-com-ci") | .permissions'
+```
+
+Required by this workflow, with the granted state as of 2026-10-13:
+
+| Permission | Needed for | Granted |
+| --- | --- | --- |
+| `contents: write` | pushing `automation/tool-pins` | yes |
+| `pull_requests: write` | opening, editing and closing the PR | yes |
+| `workflows: write` | updating pins inside `.github/workflows/*` | yes |
+| `actions: write` | `gh workflow run public-test.yml` | yes |
+| `issues: write` | `gh pr create --label`, `gh pr close --comment` | **no** — currently `issues: read` |
+
+Two of these are easy to miss:
+
+- `actions: write` is required by the dispatch step, which now authenticates
+  with the App token. A missing grant surfaces late, as a red step on an
+  otherwise-successful run, after the push and the PR are already done.
+- `issues: write` is the only current gap. Both label calls sit on the success
+  path of a run that has something to publish, so without it the push and the PR
+  succeed and the job still fails.
 
 **One-time setting:** the repository setting *Actions → General → Allow GitHub
 Actions to create and approve pull requests* must be on. Without it the branch
-is still pushed and the job fails with a compare link.
+is still pushed and the job fails with a compare link. This setting governs
+`GITHUB_TOKEN`; the App token now opens the PR, so it may no longer be required
+— that has not been retested.
 
 ## Running locally
 
