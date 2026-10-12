@@ -332,7 +332,7 @@ class WorkflowSyntaxTests(unittest.TestCase):
 
 
 class CoalescedRefreshTests(unittest.TestCase):
-    def test_refresh_is_opt_in_and_runs_after_event_failure_only_with_staged_code(self):
+    def test_refresh_shares_one_invocation_and_preserves_seed_and_signal_arguments(self):
         config = yaml.safe_load((WORKFLOWS / "reusable-pr-gatekeeper.yml").read_text())
         self.assertEqual(config[True]["workflow_call"]["inputs"]["reconcile_open"], {
             "description": "Refresh every open PR after handling the triggering event. Required for a bounded caller queue.",
@@ -340,17 +340,31 @@ class CoalescedRefreshTests(unittest.TestCase):
         })
         steps = config["jobs"]["all-checks-passed"]["steps"]
         self.assertEqual(steps[0]["id"], "evaluator")
-        refresh = steps[-1]
-        self.assertEqual(refresh["if"], "${{ always() && inputs.reconcile_open && !inputs.seed && steps.evaluator.outcome == 'success' }}")
+        self.assertEqual(len(steps), 2)
+        refresh = steps[1]
+        self.assertEqual(refresh["env"]["REQUIRE_CI"], "${{ inputs.reconcile_open }}")
+        self.assertEqual(config["jobs"]["all-checks-passed"]["runs-on"], "${{ fromJSON(inputs.runner-json) }}")
+        self.assertEqual(config[True]["workflow_call"]["inputs"]["runner-json"]["default"], '["ubuntu-latest"]')
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "pr-gatekeeper.py").write_text(
                 "import json, sys\nprint(json.dumps(sys.argv[1:]))\n")
-            result = subprocess.run(["bash", "-eu", "-c", refresh["run"]],
-                                    env={**os.environ, "RUNNER_TEMP": directory,
-                                         "GITHUB_REPOSITORY": "org/repo"},
-                                    capture_output=True, text=True, check=True)
-        self.assertEqual(result.stdout.strip(), '["--repo", "org/repo", "--reconcile-open"]')
+            for enabled, seed, review, state, expected in (
+                ("true", "false", "", "", ["--require-ci", "--reconcile-open"]),
+                ("false", "false", "", "", []),
+                ("true", "true", "", "", ["--require-ci", "--seed"]),
+                ("true", "false", "123", "", ["--require-ci", "--reconcile-open", "--review-run", "123"]),
+                ("true", "false", "", "failed", ["--require-ci", "--reconcile-open", "--persona-state", "failed", "--persona-pr", "42"]),
+            ):
+                with self.subTest(enabled=enabled, seed=seed, review=review, state=state):
+                    result = subprocess.run(["bash", "-eu", "-c", refresh["run"]],
+                                            env={**os.environ, "RUNNER_TEMP": directory,
+                                                 "GITHUB_REPOSITORY": "org/repo", "HEAD_SHA": "head",
+                                                 "REQUIRE_CI": enabled, "SEED": seed, "REVIEW_RUN_ID": review,
+                                                 "PERSONA_STATE": state, "PERSONA_PR": "42" if state else ""},
+                                            capture_output=True, text=True, check=True)
+                    import json
+                    self.assertEqual(json.loads(result.stdout), ["--repo", "org/repo", "--sha", "head"] + expected)
 
 
     def test_unrelated_completions_cannot_replace_pr_refreshes(self):

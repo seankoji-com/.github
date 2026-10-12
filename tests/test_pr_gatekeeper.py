@@ -394,6 +394,192 @@ class TestRecovery(unittest.TestCase):
         self.assertTrue(all(c.args[2]["status"] == "in_progress" for c in post.call_args_list))
 
 
+class TestInvocationRefresh(unittest.TestCase):
+    """Count real API collector paths; no cached verdict or mocked report."""
+
+    def pr(self, number=1, head="head-a", merge="merge-a"):
+        return {"number": number, "head": {"sha": head, "ref": f"fix-{number}", "repo": {"id": 42}},
+                "merge_commit_sha": merge}
+
+    def invoke(self, prs, trigger="head-a", *, snapshots=None, inventories=None,
+               read_error=None, post_error=None, extra=(), reviews=None, review_run=None):
+        self.reads, self.bodies = [], []
+        snapshots = iter(snapshots if snapshots is not None else [prs, prs])
+        inventories = inventories or {}
+
+        def get(path, token):
+            self.reads.append(path)
+            if read_error and read_error(path, self.reads):
+                raise urllib.error.URLError("fixture API failure")
+            if "/pulls?state=open" in path:
+                return next(snapshots)
+            if path.endswith("/actions/runs/123"):
+                return review_run
+            if "/reviews?" in path:
+                number = int(path.split("/pulls/")[1].split("/")[0])
+                return (reviews or {}).get(number, [])
+            if "/commits/" in path:
+                ref = path.split("/commits/")[1].split("/")[0]
+                runs, statuses, suites = inventories.get(ref, ([run("build")], EMPTY_STATUSES, []))
+                if "/check-runs?filter=all" in path:
+                    return {"check_runs": []}
+                if "/check-runs?" in path:
+                    return {"check_runs": runs}
+                if "/status?" in path:
+                    return statuses
+                if "/check-suites?" in path:
+                    return {"check_suites": suites}
+            if "/actions/runs?head_sha=" in path:
+                return {"workflow_runs": [], "total_count": 0}
+            self.fail(f"Unexpected API read: {path}")
+
+        def post(path, token, body):
+            self.assertEqual(path, "/repos/demo/repo/check-runs")
+            self.assertEqual(body["name"], GATE_CHECK_NAME)
+            self.bodies.append(body)
+            if body["head_sha"] == post_error:
+                raise urllib.error.URLError("fixture publication failure")
+            return {}
+
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=get), \
+             patch.object(pr_gatekeeper, "_post", side_effect=post):
+            return pr_gatekeeper.main(["--repo", "demo/repo", "--sha", trigger, "--reconcile-open", *extra])
+
+    def assert_counts(self, refs, review_numbers=(), extra_reads=(), read_refs=None):
+        from collections import Counter
+        expected = ["/repos/demo/repo/pulls?state=open&per_page=100&page=1"] * 2
+        for ref in (refs if read_refs is None else read_refs):
+            expected += [f"/repos/demo/repo/commits/{ref}/check-runs?filter=latest&per_page=100&page=1",
+                         f"/repos/demo/repo/commits/{ref}/status?per_page=100&page=1",
+                         f"/repos/demo/repo/commits/{ref}/check-suites?per_page=100&page=1",
+                         f"/repos/demo/repo/actions/runs?head_sha={ref}&per_page=100&page=1"]
+        expected += [f"/repos/demo/repo/pulls/{number}/reviews?per_page=100&page=1" for number in review_numbers]
+        self.assertEqual(Counter(self.reads), Counter(expected + list(extra_reads)))
+        self.assertEqual(Counter(body["head_sha"] for body in self.bodies), Counter(refs))
+
+    def test_two_prs_publish_each_head_and_merge_once(self):
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        self.assertEqual(self.invoke(prs), 0)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2])
+        self.assertTrue(all(body["status"] == "in_progress" for body in self.bodies))
+
+    def test_merge_trigger_and_shared_heads_read_every_review_and_inventory_once(self):
+        prs = [self.pr(), self.pr(2, "head-a", "merge-b")]
+        reviews = {1: [TestPersonaReview().review(sha="head-a")], 2: []}
+        self.assertEqual(self.invoke(prs, "merge-a", reviews=reviews), 0)
+        self.assert_counts(["head-a", "merge-a", "merge-b"], [1, 2])
+        self.assertTrue(all(body["status"] == "in_progress" for body in self.bodies))
+
+    def test_stale_or_closed_trigger_cannot_skip_current_pr_destinations(self):
+        for trigger in ("old-head", "old-merge"):
+            with self.subTest(trigger=trigger):
+                prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+                self.assertEqual(self.invoke(prs, trigger), 0)
+                self.assert_counts([trigger, "head-a", "merge-a", "head-b", "merge-b"], [1, 2])
+        self.assertEqual(self.invoke([], "closed-merge"), 0)
+        self.assert_counts(["closed-merge"])
+
+    def test_head_changes_between_event_and_refresh(self):
+        initial = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        current = [self.pr(1, "new-head", "new-merge"), initial[1]]
+        self.assertEqual(self.invoke(initial, snapshots=[initial, current]), 0)
+        self.assert_counts(["head-a", "merge-a", "new-head", "new-merge", "head-b", "merge-b"], [1, 1, 2])
+
+    def test_metadata_change_with_same_head_requires_current_review_and_merge_inventory(self):
+        initial = [self.pr()]
+        current = [self.pr(1, "head-a", "new-merge"), self.pr(2, "head-a", "merge-b")]
+        self.assertEqual(self.invoke(initial, snapshots=[initial, current]), 0)
+        self.assert_counts(["head-a", "merge-a", "head-a", "new-merge", "merge-b"], [1, 1, 2])
+
+    def test_previously_unassociated_sha_cannot_suppress_a_new_current_pr(self):
+        current = [self.pr(2, "head-a", "merge-b")]
+        self.assertEqual(self.invoke([], snapshots=[[], current]), 0)
+        self.assert_counts(["head-a", "head-a", "merge-b"], [2])
+        self.assertEqual(self.bodies[-1]["status"], "in_progress")
+
+    def test_read_failure_blocks_both_refs_and_continues_other_pr(self):
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        self.assertEqual(self.invoke(prs, read_error=lambda path, _: "/commits/head-a/check-runs?filter=latest" in path), 2)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2],
+                           ["/repos/demo/repo/commits/head-a/check-runs?filter=latest&per_page=100&page=1",
+                            "/repos/demo/repo/commits/head-a/check-runs?filter=all&per_page=100&page=1"],
+                           read_refs=["head-b", "merge-b"])
+        self.assertEqual([body["head_sha"] for body in self.bodies], ["head-a", "merge-a", "head-b", "merge-b"])
+        self.assertTrue(all(body["conclusion"] == "failure" for body in self.bodies[:2]))
+        self.assertTrue(all(body["status"] == "in_progress" for body in self.bodies[2:]))
+
+    def test_partial_publication_does_not_repeat_trigger_or_skip_other_pr(self):
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        self.assertEqual(self.invoke(prs, post_error="head-a"), 2)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2])
+
+    def test_initial_metadata_failure_keeps_blocking_fallback_and_current_refresh(self):
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        self.assertEqual(self.invoke(prs, snapshots=[prs], read_error=lambda path, reads: len(reads) == 1), 2)
+        self.assert_counts(["head-a", "head-a", "merge-a", "head-b", "merge-b"], [1, 2],
+                           ["/repos/demo/repo/commits/head-a/check-runs?filter=all&per_page=100&page=1"],
+                           read_refs=["head-a", "merge-a", "head-b", "merge-b"])
+        self.assertEqual([body["head_sha"] for body in self.bodies], ["head-a", "head-a", "merge-a", "head-b", "merge-b"])
+        self.assertEqual(self.bodies[0]["conclusion"], "failure")
+
+    def test_refresh_metadata_failure_is_not_success(self):
+        prs = [self.pr()]
+        self.assertEqual(self.invoke(prs, read_error=lambda path, reads: "/pulls?state=open" in path and len(reads) > 1), 2)
+        self.assert_counts(["head-a", "merge-a"], [1])
+
+    def test_fork_review_uses_trusted_resolution_and_same_invocation_metadata(self):
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        event = {"event": "pull_request_review", "head_sha": "old-merge", "pull_requests": [],
+                 "head_repository": {"id": 42}, "head_branch": "fix-1"}
+        self.assertEqual(self.invoke(prs, "old-merge", extra=["--review-run", "123"], review_run=event), 0)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2], ["/repos/demo/repo/actions/runs/123"])
+
+    def test_unassociated_fork_signal_retains_failure_and_refresh(self):
+        prs = [self.pr()]
+        event = {"event": "pull_request_review", "head_sha": "unrelated", "pull_requests": []}
+        self.assertEqual(self.invoke(prs, "old-merge", extra=["--review-run", "123"], review_run=event), 2)
+        self.assert_counts(["old-merge", "head-a", "merge-a"], [1],
+                           ["/repos/demo/repo/actions/runs/123",
+                            "/repos/demo/repo/commits/old-merge/check-runs?filter=all&per_page=100&page=1"],
+                           read_refs=["head-a", "merge-a"])
+        self.assertEqual([body["head_sha"] for body in self.bodies], ["old-merge", "head-a", "merge-a"])
+        self.assertEqual(self.bodies[0]["conclusion"], "failure")
+
+    def test_exact_head_persona_signal_survives_without_second_publication(self):
+        for state in ("running", "failed"):
+            with self.subTest(state=state):
+                prs = [self.pr()]
+                self.assertEqual(self.invoke(prs, extra=["--persona-state", state, "--persona-pr", "1"]), 0)
+                self.assert_counts(["head-a", "merge-a"], [1])
+                self.assertTrue(all(f"{state}:" in body["output"]["summary"] for body in self.bodies))
+
+    def test_stale_persona_signal_cannot_mark_current_head_running(self):
+        self.assertEqual(self.invoke([self.pr()], "old-head", extra=["--persona-state", "running", "--persona-pr", "1"]), 0)
+        self.assert_counts(["old-head", "head-a", "merge-a"], [1])
+        self.assertTrue(all("review running" not in body["output"]["title"] for body in self.bodies))
+
+    def test_current_exact_head_approvals_allow_success_on_every_destination(self):
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        reviews = {1: [TestPersonaReview().review(sha="head-a")],
+                   2: [TestPersonaReview().review(sha="head-b")]}
+        self.assertEqual(self.invoke(prs, reviews=reviews), 0)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2])
+        self.assertTrue(all(body.get("conclusion") == "success" for body in self.bodies))
+
+    def test_empty_failed_cancelled_and_stale_review_inputs_never_pass(self):
+        reviews = {1: [TestPersonaReview().review(sha="old-head")]}
+        cases = [("empty", ([], EMPTY_STATUSES, []), "in_progress"),
+                 ("failed", ([run("build", conclusion="failure")], EMPTY_STATUSES, []), "completed"),
+                 ("cancelled", ([run("build", conclusion="cancelled")], EMPTY_STATUSES, []), "completed"),
+                 ("status-failed", ([], {"total_count": 1, "statuses": [{"context": "deploy", "state": "failure"}]}, []), "completed")]
+        for label, inventory, status in cases:
+            with self.subTest(label=label):
+                self.assertEqual(self.invoke([self.pr()], inventories={"head-a": inventory, "merge-a": inventory}, reviews=reviews), 0)
+                self.assert_counts(["head-a", "merge-a"], [1])
+                self.assertTrue(all(body["status"] == status and body.get("conclusion") != "success" for body in self.bodies))
+
+
 class TestCommitStatuses(unittest.TestCase):
     def test_total_count_zero_is_not_pending(self):
         """GitHub reports state 'pending' on an empty statuses response. No

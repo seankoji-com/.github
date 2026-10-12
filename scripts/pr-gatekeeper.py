@@ -539,14 +539,14 @@ def persona_progress(checks: list[dict], prior_runs: list[dict],
     return descriptions
 
 
-def resolve_review_heads(repo: str, run_id: int, token: str) -> list[str]:
+def resolve_review_heads(repo: str, run_id: int, token: str, open_prs: list[dict] | None = None) -> list[str]:
     """Resolve fork review signals using trusted GitHub run and PR metadata."""
     run = _get(f"/repos/{repo}/actions/runs/{run_id}", token)
     if run.get("event") != "pull_request_review":
         raise ValueError("not a review event workflow run")
     linked = {p["number"] for p in run.get("pull_requests", [])}
     heads = set()
-    for pr in _list_all(f"/repos/{repo}/pulls?state=open", token):
+    for pr in (open_prs if open_prs is not None else _list_all(f"/repos/{repo}/pulls?state=open", token)):
         head = pr["head"]
         same_branch = ((run.get("head_repository") or {}).get("id") is not None
                        and (head.get("repo") or {}).get("id") == run["head_repository"]["id"]
@@ -745,12 +745,56 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
     return publish(repo, publish_refs, token, status, conclusion, title, summary, dry_run, result)
 
 
+def reconcile_open(repo: str, token: str, dry_run: bool, sha: str | None = None,
+                   review_run: int | None = None, persona_state: str = "", persona_pr: int = 0) -> int:
+    """Handle the event and current PRs once per destination inventory.
+
+    Tracking lasts only for this invocation. A fresh PR snapshot after the
+    event catches changed heads/merge refs and shared-head review membership.
+    SHA-only tracking would incorrectly suppress those current destinations.
+    """
+    evaluated = set()
+    result = 0
+
+    def refresh(target, prs, *, signal=False):
+        nonlocal result
+        matches = matching_prs(prs, target)
+        # Merge events use the same head inventory as the subsequent refresh.
+        head = matches[0]["head"]["sha"] if matches else target
+        destinations = tuple(sorted((pr.get("number", 0), pr["head"]["sha"],
+                                     pr.get("merge_commit_sha") or "") for pr in matches))
+        key = (head, destinations)
+        if key in evaluated:
+            return
+        result = max(result, report(repo, head, token, dry_run, open_prs=prs,
+                                    persona_state=persona_state if signal and head == sha else "",
+                                    persona_pr=persona_pr if signal and head == sha else 0))
+        # Failed reads/publications still count as attempts and keep result=2.
+        evaluated.add(key)
+
+    if sha:
+        try:
+            prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
+            heads = resolve_review_heads(repo, review_run, token, prs) if review_run else [sha]
+            for head in heads:
+                refresh(head, prs, signal=True)
+        except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            result = max(result, report(repo, sha, token, dry_run, error=str(exc)))
+    try:
+        prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
+        for head in sorted({pr["head"]["sha"] for pr in prs}):
+            refresh(head, prs)
+    except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
+        print(f"::error::could not reconcile open PRs: {exc}", file=sys.stderr)
+        return 2
+    return result
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/name")
-    target = parser.add_mutually_exclusive_group(required=True)
-    target.add_argument("--sha", help="head commit SHA")
-    target.add_argument("--reconcile-open", action="store_true", help="refresh every open PR in this repository")
+    parser.add_argument("--sha", help="head commit SHA")
+    parser.add_argument("--reconcile-open", action="store_true", help="refresh every open PR in this repository")
     parser.add_argument("--review-run", type=int, help="resolve the current PR head from a review signal run")
     parser.add_argument("--dry-run", action="store_true", help="evaluate without posting")
     parser.add_argument("--seed", action="store_true", help="post an in-progress seed check and exit without evaluating")
@@ -758,6 +802,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--persona-state", choices=("running", "failed"), default="")
     parser.add_argument("--persona-pr", type=int, default=0)
     args = parser.parse_args(argv)
+    if not args.sha and not args.reconcile_open:
+        parser.error("--sha or --reconcile-open is required")
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         print("::error::GITHUB_TOKEN is not set", file=sys.stderr)
@@ -772,28 +818,21 @@ def main(argv: list[str]) -> int:
         return report(args.repo, args.sha, token, args.dry_run, seed=True, require_ci=args.require_ci)
     if bool(args.persona_state) != bool(args.persona_pr) or args.persona_pr < 0:
         parser.error("--persona-state and --persona-pr must be provided together")
-    if args.persona_state and (args.reconcile_open or args.review_run):
+    if args.persona_state and (not args.sha or args.review_run):
         parser.error("persona signal inputs require a single --sha target")
+    if args.review_run and not args.sha:
+        parser.error("--review-run requires --sha as its blocking fallback")
+    if args.reconcile_open:
+        return reconcile_open(args.repo, token, args.dry_run, args.sha, args.review_run,
+                              args.persona_state, args.persona_pr)
     if args.review_run:
-        if not args.sha:
-            parser.error("--review-run requires --sha as its blocking fallback")
         try:
             heads = resolve_review_heads(args.repo, args.review_run, token)
         except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             return report(args.repo, args.sha, token, args.dry_run, error=str(exc))
         return max(report(args.repo, head, token, args.dry_run, require_ci=args.require_ci) for head in heads)
-    if not args.reconcile_open:
-        return report(args.repo, args.sha, token, args.dry_run,
-                      persona_state=args.persona_state, persona_pr=args.persona_pr, require_ci=args.require_ci)
-    result = 0
-    try:
-        prs = _list_all(f"/repos/{args.repo}/pulls?state=open", token)
-        for sha in sorted({pr["head"]["sha"] for pr in prs}):
-            result = max(result, report(args.repo, sha, token, args.dry_run, open_prs=prs))
-        return result
-    except (urllib.error.URLError, OSError, ValueError, TypeError, KeyError) as exc:
-        print(f"::error::could not reconcile open PRs: {exc}", file=sys.stderr)
-        return 2
+    return report(args.repo, args.sha, token, args.dry_run,
+                  persona_state=args.persona_state, persona_pr=args.persona_pr, require_ci=args.require_ci)
 
 
 if __name__ == "__main__":
