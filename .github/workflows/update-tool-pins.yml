@@ -118,12 +118,20 @@ jobs:
     needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # No GITHUB_TOKEN write scope here, and no GH_TOKEN aimed at one. This job
+    # rewrites pins inside workflow files, and GITHUB_TOKEN can never carry the
+    # `workflows` permission, so its push is refused outright:
+    #   ! [remote rejected] automation/tool-pins -> automation/tool-pins
+    #   (refusing to allow a GitHub App to create or update workflow
+    #    `.github/workflows/reusable-static-analysis.yml` without `workflows`
+    #    permission)                    -- run 38229516764, 2026-10-12
+    # A `permissions:` block cannot grant it; there is no such key. The write
+    # identity is the org App the rest of the fleet already pushes with, minted
+    # in this job and handed to `gh` and `git push` by the steps that need it.
+    # contents: read is all this job's own token still needs, for the checkout.
     permissions:
-      contents: write       # push the automation branch
-      pull-requests: write  # open, update or close its PR
-      actions: write        # dispatch public-test on the branch (see below)
+      contents: read
     env:
-      GH_TOKEN: ${{ github.token }}
       CHANGED: ${{ needs.resolve.outputs.changed }}
       ERRORS: ${{ needs.resolve.outputs.errors }}
     steps:
@@ -138,11 +146,22 @@ jobs:
           name: tool-pins-report
           path: ${{ runner.temp }}/report
 
+      # Minted here and not in `env:` at job level: a job-level env value is
+      # expanded when the job starts, so it cannot read a step output.
+      - name: Mint the push identity
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.SEANKOJI_CI_APP_ID }}
+          private-key: ${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}
+
       # Needs the repository setting "Allow GitHub Actions to create and approve
       # pull requests". Without it the push still succeeds and the job fails
       # with a compare link instead of opening the PR.
       - name: Open or update the pull request
         if: env.CHANGED == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           set -euo pipefail
           report="$RUNNER_TEMP/report/report.json"
@@ -205,6 +224,8 @@ jobs:
       # PR whose bumps are still pending.
       - name: Close the PR when main already has these pins
         if: env.CHANGED == 'false' && env.ERRORS == '0'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           number="$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')"
           if [ -n "$number" ]; then
