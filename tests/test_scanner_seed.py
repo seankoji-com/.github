@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import importlib.util
 import io
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -114,8 +115,8 @@ class SeedTests(unittest.TestCase):
         self.start_os.start()
         self.addCleanup(self.start_os.stop)
 
-    def fixture(self, tool="zizmor"):
-        path = self.root / "seed"
+    def fixture(self, tool="zizmor", *, root=None):
+        path = (root or self.root) / "seed"
         shutil.copytree(self.__class__.root / (tool + "-seed"), path)
         for entry in [path, *path.rglob("*")]:
             entry.chmod(0o555 if entry.is_dir() else 0o444)
@@ -136,6 +137,35 @@ class SeedTests(unittest.TestCase):
         subprocess.run([sys.executable, "-I", "-m", "venv", "--clear", str(path)],
                        check=True, timeout=30, capture_output=True)
         return path
+
+    def workflow_venv(self, path, layout):
+        # Both alias directions must keep executing a real venv interpreter.
+        # The optional uv executable exercises its actual offline creation too;
+        # CI needs no additional dependency to reproduce its alias topology.
+        uv = os.environ.get("SCANNER_TEST_UV")
+        if layout == "uv" and uv:
+            subprocess.run([uv, "venv", "--offline", "--no-cache", "--no-config",
+                            "--no-python-downloads", "--no-managed-python",
+                            "--python", sys.executable, str(path)],
+                           check=True, timeout=30, capture_output=True)
+            subprocess.run([str(path / "bin/python"), "-I", "-m", "ensurepip"],
+                           check=True, timeout=30, capture_output=True)
+        else:
+            subprocess.run([str(self.__class__.python.with_name("python3")), "-I", "-m",
+                            "venv", str(path)], check=True, timeout=30, capture_output=True)
+            if layout == "uv":
+                interpreter = (path / "bin/python3").resolve()
+                for alias in (path / "bin").glob("python*"):
+                    alias.unlink()
+                (path / "bin/python").symlink_to(interpreter)
+                (path / "bin/python3").symlink_to("python")
+                (path / f"bin/python3.{sys.version_info.minor}").symlink_to("python")
+        alias = path / ("bin/python" if layout == "venv" else "bin/python3")
+        self.assertEqual(os.readlink(alias), "python3" if layout == "venv" else "python")
+        result = subprocess.run([str(path / "bin/python3"), "-I", "-c",
+                                 "import sysconfig; print(sysconfig.get_path('purelib'))"],
+                                check=True, timeout=10, capture_output=True, text=True)
+        return Path(result.stdout.strip())
 
     def consume(self, path, trust, tool="zizmor"):
         with patch.object(seed, "seed_path", return_value=path), patch.object(seed, "immutable", side_effect=trust):
@@ -217,9 +247,12 @@ class SeedTests(unittest.TestCase):
             self.assertEqual(probe["if"], "steps.python.outcome == 'success'")
             self.assertEqual(cache["if"], "steps.seed.outcome == 'success' && steps.seed.outputs.cache_mode == 'fallback'")
             self.assertEqual(install["if"], "steps.python.outcome == 'success' && steps.seed.outcome == 'success'")
-            for case in ("offline", "missing", "abi-mismatch", "pin-mismatch", "corrupt"):
-                with self.subTest(tool=tool, case=case):
-                    path, trust = self.fixture(tool)
+            for layout, case in product(("venv", "uv"),
+                                        ("offline", "missing", "abi-mismatch", "pin-mismatch", "corrupt")):
+                with self.subTest(tool=tool, layout=layout, case=case), \
+                     tempfile.TemporaryDirectory(dir=self.root) as temp:
+                    root = Path(temp)
+                    path, trust = self.fixture(tool, root=root)
                     if case == "missing":
                         self.remove_fixture(path)
                     elif case == "abi-mismatch":
@@ -228,15 +261,14 @@ class SeedTests(unittest.TestCase):
                         self.rewrite(path, lambda m: m["identity"]["pins"].update(PIN_PIP="0.0"))
                     elif case == "corrupt":
                         self.rewrite(path, lambda m: m.update(wheels=[]))
-                    job_venv = self.root / (tool + "-venv")
-                    subprocess.run([sys.executable, "-I", "-m", "venv", "--clear", str(job_venv)],
-                                   check=True, timeout=30, capture_output=True)
-                    shim = job_venv / "bin/python3"
-                    shim.unlink()
-                    # Execute the workflow's literal heredoc/checksum and helper.
-                    # Model only the root-owned Linux image boundary. Trap any
-                    # fallback download before it can reach the network.
-                    shim.write_text(f"#!{sys.executable} -B\n" + '''import builtins, json, os, subprocess, sys
+                    job_venv = root / (tool + "-venv")
+                    site = self.workflow_venv(job_venv, layout)
+                    interpreters = {name: (job_venv / "bin" / name).resolve()
+                                    for name in ("python", "python3")}
+                    # Execute the literal workflow with intact venv interpreters.
+                    # sitecustomize loads even under -I and stubs only image
+                    # trust and downloads when the embedded helper executes.
+                    (site / "sitecustomize.py").write_text('''import builtins, json, os, subprocess
 from pathlib import Path
 from unittest.mock import patch
 original_exec = builtins.exec
@@ -264,19 +296,16 @@ def fixture_exec(code, namespace=None, *args, **kwargs):
             raise subprocess.CalledProcessError(17, ["fixture-download-trap"])
         return original_pip(python, *args)
     namespace["pip_command"] = pip
-    namespace["main"]()
+    try:
+        namespace["main"]()
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(error.returncode)
 builtins.exec = fixture_exec
-sys.argv = ["-", *sys.argv[sys.argv.index("-") + 1:]]
-try:
-    original_exec(compile(sys.stdin.read(), "workflow-heredoc", "exec"), {"__name__": "__main__"})
-except subprocess.CalledProcessError as error:
-    sys.exit(error.returncode)
 ''')
-                    shim.chmod(0o755)
-                    output, github_path, pip_log = (self.root / name for name in ("output", "github-path", "pip-calls"))
+                    output, github_path, pip_log = (root / name for name in ("output", "github-path", "pip-calls"))
                     for p in (output, github_path, pip_log):
                         p.unlink(missing_ok=True)
-                    env = {**os.environ, **PINS, "RUNNER_TEMP": str(self.root),
+                    env = {**os.environ, **PINS, "RUNNER_TEMP": str(root),
                            "GITHUB_OUTPUT": str(output), "GITHUB_PATH": str(github_path),
                            "FIXTURE_SEED": str(path), "FIXTURE_PIP_LOG": str(pip_log)}
                     result = subprocess.run(["/bin/bash", "-c", probe["run"]], env=env,
@@ -314,7 +343,7 @@ except subprocess.CalledProcessError as error:
                         self.assertIn("--retries", call)
                     else:
                         self.assertFalse(pip_log.exists())
-                        report = self.root / "summary"
+                        report = root / "summary"
                         report.unlink(missing_ok=True)
                         result = subprocess.run(["/bin/bash", "-c", summary["run"]],
                             env={**env, "INSTALL_OUTCOME": "skipped", "SCAN_OUTCOME": "skipped",
@@ -328,6 +357,11 @@ except subprocess.CalledProcessError as error:
                                    "github.event.repository.default_branch": "main", "steps.scan.outcome": "success",
                                    "steps.cache.outputs.cache-hit": "false", "steps.cache.outputs.cache-primary-key": "key"})
                     self.assertFalse(condition(save["if"], values))
+                    for name, interpreter in interpreters.items():
+                        self.assertEqual((job_venv / "bin" / name).resolve(), interpreter)
+                        self.assertEqual(subprocess.check_output(
+                            [str(job_venv / "bin" / name), "-I", "-c", "import sys; print(sys.prefix)"],
+                            env=env, text=True, timeout=10).strip(), str(job_venv))
                     if path.exists():
                         self.remove_fixture(path)
 
