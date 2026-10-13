@@ -67,13 +67,26 @@ jobs:
             exit 1
           fi
           REF="${JOB_WORKFLOW_SHA}"
-          curl -fsS \
-            "https://raw.githubusercontent.com/seankoji-com/.github/${REF}/scripts/pr-gatekeeper.py" \
-            -o "${RUNNER_TEMP}/pr-gatekeeper.py" \
-            || { echo "::error::failed to fetch pr-gatekeeper.py at ref ${REF}"; exit 1; }
-          [ -s "${RUNNER_TEMP}/pr-gatekeeper.py" ] || {
-            echo "::error::fetched pr-gatekeeper.py is empty"; exit 1;
-          }
+          # The evaluator imports the sibling module scripts/gatekeeper_workflows.py
+          # at module load, so BOTH files must be staged from the SAME immutable
+          # revision. Fetch each from raw.githubusercontent.com at
+          # job.workflow_sha — never the caller's head, a branch name, or any
+          # PR-controlled ref — and require every fetch to succeed with a
+          # non-empty file before the evaluation step may run. The task-owned
+          # outputs are removed first so a leftover copy (a stale RUNNER_TEMP, an
+          # interrupted earlier fetch) can never satisfy staging.
+          for file in pr-gatekeeper.py gatekeeper_workflows.py; do
+            rm -f "${RUNNER_TEMP}/${file}"
+          done
+          for file in pr-gatekeeper.py gatekeeper_workflows.py; do
+            curl -fsS \
+              "https://raw.githubusercontent.com/seankoji-com/.github/${REF}/scripts/${file}" \
+              -o "${RUNNER_TEMP}/${file}" \
+              || { echo "::error::failed to fetch ${file} at ref ${REF}"; exit 1; }
+            [ -s "${RUNNER_TEMP}/${file}" ] || {
+              echo "::error::fetched ${file} is empty"; exit 1;
+            }
+          done
 
       - name: Evaluate and post the gate
         shell: bash

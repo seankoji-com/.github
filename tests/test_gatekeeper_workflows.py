@@ -1,10 +1,12 @@
 """Queued workflows must block before their jobs have check runs."""
 
 import pathlib
+import hashlib
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -16,7 +18,13 @@ from test_pr_gatekeeper import EMPTY_STATUSES, pr_gatekeeper
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
+SCRIPTS = ROOT / "scripts"
+REUSABLE_GATEKEEPER = WORKFLOWS / "reusable-pr-gatekeeper.yml"
 GATE_CALLER = WORKFLOWS / "call-reusable-pr-gatekeeper.yml"
+# Any 40-hex value is a valid identity; the fixture asserts the *exact same*
+# literal is reused for every fetch and that no branch name or caller ref
+# reaches the URL.
+STAGING_SHA = "a" * 40
 # The only keys GitHub accepts on a job that calls a reusable workflow.
 REUSABLE_CALLER_KEYS = {"name", "uses", "with", "secrets", "needs", "if",
                         "permissions", "strategy", "concurrency"}
@@ -801,6 +809,226 @@ class CoalescedRefreshTests(unittest.TestCase):
                     })
                     expected = "pr-gatekeeper-refresh-org/repo" if coalesces else "pr-gatekeeper-event-42"
                     self.assertEqual(actual, expected)
+
+
+FIXTURE_CURL = r'''#!/bin/sh
+# Inert stand-in for curl. It never opens a socket: it validates the URL it was
+# handed against the exact trusted boundary (seankoji-com/.github at one 40-hex
+# revision, scripts/ only), records it, then serves the committed file from
+# FIXTURE_SOURCE_DIR. Any other repository, ref or path is a violation.
+url=""
+dest=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) shift; dest="$1" ;;
+    -*) ;;
+    *) url="$1" ;;
+  esac
+  shift
+done
+printf '%s\n' "$url" >> "$URL_LOG"
+file=${url##*/}
+case "$url" in
+  "https://raw.githubusercontent.com/seankoji-com/.github/${FIXTURE_SHA}/scripts/${file}") ;;
+  *) printf '%s\n' "$url" >> "$VIOLATION_LOG"; exit 3 ;;
+esac
+[ "$FIXTURE_FAIL" = "$file" ] && exit 7
+if [ "$FIXTURE_EMPTY" = "$file" ]; then : > "$dest"; exit 0; fi
+cp "${FIXTURE_SOURCE_DIR}/${file}" "$dest"
+'''
+
+EVALUATOR_TRIPWIRE = r'''#!/bin/sh
+# Records any attempt to execute the evaluator while it is being staged.
+# Staging must never run it: a non-empty log is a failure.
+printf '%s\n' "$@" >> "$TRIPWIRE"
+exit 99
+'''
+
+
+def gatekeeper_interpreters():
+    """Interpreters the staged evaluator must load under.
+
+    The running interpreter covers whichever of 3.10/3.12 executes this suite;
+    an explicit python3.10/python3.12 on PATH is exercised too, so a single run
+    (for example the 3.10 gate) loads the staged bundle under both.
+    """
+    found = []
+    for candidate in (sys.executable, shutil.which("python3.10"), shutil.which("python3.12")):
+        if not candidate:
+            continue
+        resolved = str(pathlib.Path(candidate).resolve())
+        if resolved not in found:
+            found.append(resolved)
+    return found
+
+
+class EvaluatorStagingTests(unittest.TestCase):
+    """The literal `Stage the evaluator` shell, executed offline.
+
+    scripts/pr-gatekeeper.py imports the sibling module gatekeeper_workflows at
+    module load. A stage step that fetches only the entrypoint therefore leaves
+    the evaluator unable to start on every runner: `python3 -I pr-gatekeeper.py`
+    exits 1 with ModuleNotFoundError before main() runs, and no
+    `gatekeeper / all-checks-passed` check run is ever posted. These tests run
+    the real `run` block from reusable-pr-gatekeeper.yml against a fixture curl
+    that serves the committed files by URL and asserts the URL it was handed,
+    then load the staged bundle under real interpreters.
+    """
+
+    def setUp(self):
+        self.job = yaml.safe_load(REUSABLE_GATEKEEPER.read_text())["jobs"]["all-checks-passed"]
+        self.stage_step = self.job["steps"][0]
+
+    def environment(self, root, *, sha=STAGING_SHA, fail="", empty="", stale_helper=""):
+        binary = root / "bin"
+        binary.mkdir(exist_ok=True)
+        for name, body in (("curl", FIXTURE_CURL), ("python3", EVALUATOR_TRIPWIRE)):
+            program = binary / name
+            program.write_text(body)
+            program.chmod(0o755)
+        runner_temp = root / "runner-temp"
+        runner_temp.mkdir(exist_ok=True)
+        if stale_helper:
+            (runner_temp / stale_helper).write_text('raise SystemExit("stale leftover")\n')
+        for name in ("urls", "violations"):
+            (root / name).write_text("")
+        return {
+            # Fixture-only PATH: the dummy curl replaces the real one, and the
+            # tripwire python3 would record any evaluator execution.
+            "PATH": f"{binary}:/usr/bin:/bin",
+            "JOB_WORKFLOW_SHA": sha,
+            "RUNNER_TEMP": str(runner_temp),
+            "FIXTURE_SHA": STAGING_SHA,
+            "FIXTURE_SOURCE_DIR": str(SCRIPTS),
+            "FIXTURE_FAIL": fail,
+            "FIXTURE_EMPTY": empty,
+            "URL_LOG": str(root / "urls"),
+            "VIOLATION_LOG": str(root / "violations"),
+            "TRIPWIRE": str(root / "tripwire"),
+        }
+
+    def run_stage(self, root, environment):
+        return subprocess.run(
+            [shutil.which("bash") or "/bin/bash", "-euo", "pipefail", "-c", self.stage_step["run"]],
+            cwd=root, env=environment, capture_output=True, text=True, timeout=30,
+        )
+
+    def urls(self, root):
+        return (root / "urls").read_text().splitlines()
+
+    def assert_rejected(self, result, root):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((root / "tripwire").exists(), "staging must not execute the evaluator")
+        self.assertEqual((root / "violations").read_text(), "", "staging fetched an untrusted URL")
+        self.assertTrue(all("api.github.com" not in url for url in self.urls(root)))
+
+    def assert_loads(self, bundle, cwd):
+        """Load the staged entrypoint with `-I --help`: no token, no network."""
+        interpreters = gatekeeper_interpreters()
+        self.assertTrue(interpreters, "no interpreter available to load the staged bundle")
+        for interpreter in interpreters:
+            with self.subTest(interpreter=interpreter):
+                result = subprocess.run(
+                    [interpreter, "-I", str(bundle), "--help"], cwd=cwd,
+                    env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True, timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("usage: ", result.stdout)
+                self.assertIn("--reconcile-open", result.stdout)
+        return interpreters
+
+    def test_stage_fetches_both_modules_at_one_sha_into_a_loadable_bundle(self):
+        with tempfile.TemporaryDirectory(prefix="gatekeeper-stage-") as directory:
+            root = pathlib.Path(directory)
+            environment = self.environment(root)
+            # A decoy in the working directory: the sibling import must come
+            # from the staged directory, never from the caller's checkout.
+            (root / "gatekeeper_workflows.py").write_text('raise SystemExit("decoy helper loaded")\n')
+            result = self.run_stage(root, environment)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            expected = [
+                f"https://raw.githubusercontent.com/seankoji-com/.github/{STAGING_SHA}/scripts/pr-gatekeeper.py",
+                f"https://raw.githubusercontent.com/seankoji-com/.github/{STAGING_SHA}/scripts/gatekeeper_workflows.py",
+            ]
+            self.assertEqual(self.urls(root), expected)
+            self.assertEqual((root / "violations").read_text(), "")
+            self.assertFalse((root / "tripwire").exists(), "staging must not execute the evaluator")
+            runner_temp = pathlib.Path(environment["RUNNER_TEMP"])
+            entrypoint = runner_temp / "pr-gatekeeper.py"
+            for staged in (entrypoint, runner_temp / "gatekeeper_workflows.py"):
+                self.assertTrue(staged.is_file(), staged)
+                self.assertEqual(
+                    hashlib.sha256(staged.read_bytes()).hexdigest(),
+                    hashlib.sha256((SCRIPTS / staged.name).read_bytes()).hexdigest(),
+                )
+            self.assertTrue(self.assert_loads(entrypoint, root))
+
+    def test_malformed_identity_never_fetches(self):
+        for sha in ("", "main", "a" * 39, "a" * 41, "A" * 40, "a" * 40 + "\nstaged=true", "\n" + "a" * 40):
+            with self.subTest(sha=sha), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                self.assert_rejected(self.run_stage(root, self.environment(root, sha=sha)), root)
+                self.assertEqual(self.urls(root), [])
+
+    def test_fetch_failure_or_empty_file_rejects_before_evaluation(self):
+        for name in ("pr-gatekeeper.py", "gatekeeper_workflows.py"):
+            for kind in ("fail", "empty"):
+                with self.subTest(file=name, kind=kind), tempfile.TemporaryDirectory() as directory:
+                    root = pathlib.Path(directory)
+                    result = self.run_stage(root, self.environment(root, **{kind: name}))
+                    self.assert_rejected(result, root)
+                    urls = self.urls(root)
+                    self.assertTrue(urls)
+                    self.assertTrue(all(f"/{STAGING_SHA}/scripts/" in url for url in urls))
+
+    def test_stale_helper_cannot_satisfy_staging(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            environment = self.environment(
+                root, fail="gatekeeper_workflows.py", stale_helper="gatekeeper_workflows.py"
+            )
+            self.assert_rejected(self.run_stage(root, environment), root)
+            runner_temp = pathlib.Path(environment["RUNNER_TEMP"])
+            self.assertFalse(
+                (runner_temp / "gatekeeper_workflows.py").exists(),
+                "a leftover helper must be removed, never accepted",
+            )
+
+    def test_entrypoint_only_bundle_cannot_start_the_evaluator(self):
+        """The defect this change repairs: the evaluator's own import.
+
+        The old staging fetched only pr-gatekeeper.py. An entrypoint-only
+        directory cannot start it, so the literal stage step above is what makes
+        the bundle usable.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = pathlib.Path(directory) / "bundle"
+            bundle.mkdir()
+            shutil.copy(SCRIPTS / "pr-gatekeeper.py", bundle / "pr-gatekeeper.py")
+            result = subprocess.run(
+                [gatekeeper_interpreters()[0], "-I", str(bundle / "pr-gatekeeper.py"), "--help"],
+                cwd=directory, env={"PATH": "/usr/bin:/bin"},
+                capture_output=True, text=True, timeout=30,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ModuleNotFoundError", result.stderr)
+            self.assertIn("gatekeeper_workflows", result.stderr)
+
+    def test_stage_step_pins_one_revision_for_both_modules_without_checkout(self):
+        self.assertFalse(
+            any("actions/checkout" in step.get("uses", "") for step in self.job["steps"]),
+            "the gate must never check out caller or PR code",
+        )
+        self.assertEqual(self.stage_step["id"], "evaluator")
+        self.assertEqual(self.stage_step["env"]["JOB_WORKFLOW_SHA"], "${{ job.workflow_sha }}")
+        self.assertIn('=~ ^[0-9a-f]{40}$', self.stage_step["run"])
+        self.assertNotIn("${{", self.stage_step["run"])
+        self.assertIn("for file in pr-gatekeeper.py gatekeeper_workflows.py; do", self.stage_step["run"])
+        self.assertIn(
+            '"https://raw.githubusercontent.com/seankoji-com/.github/${REF}/scripts/${file}"',
+            self.stage_step["run"],
+        )
+        self.assertIn('python3 "${RUNNER_TEMP}/pr-gatekeeper.py"', self.job["steps"][1]["run"])
 
 
 if __name__ == "__main__":
