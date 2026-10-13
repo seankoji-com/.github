@@ -84,19 +84,18 @@ class TestBlocking(unittest.TestCase):
         self.assertEqual((status, conclusion), ("completed", "failure"))
 
     def test_cancelled_timed_out_and_action_required_all_block(self):
-        for bad in ("cancelled", "timed_out", "action_required", "failure", None):
+        for bad in ("cancelled", "timed_out", "action_required", "failure", "stale", None):
             with self.subTest(conclusion=bad):
                 status, conclusion, _, _ = evaluate(
                     [run("x", conclusion=bad)], EMPTY_STATUSES, []
                 )
                 self.assertEqual((status, conclusion), ("completed", "failure"))
 
-    def test_skipped_neutral_stale_do_not_block(self):
+    def test_skipped_neutral_do_not_block(self):
         status, conclusion, _, _ = evaluate(
             [
                 run("a", conclusion="skipped"),
                 run("b", conclusion="neutral", run_id=2),
-                run("c", conclusion="stale", run_id=3),
                 run("d", conclusion="success", run_id=4),
             ],
             EMPTY_STATUSES,
@@ -179,6 +178,13 @@ class TestSelfExclusion(unittest.TestCase):
 
 
 class TestDedupe(unittest.TestCase):
+    def test_latest_stale_check_cannot_inherit_older_success(self):
+        old = run("scan", run_id=1)
+        latest = run("scan", run_id=2, conclusion="stale", started_at="2026-09-02T00:00:00Z")
+        status, conclusion, _, summary = evaluate([old, latest, run("other CI")], EMPTY_STATUSES, [])
+        self.assertEqual((status, conclusion), ("completed", "failure"))
+        self.assertIn("scan (stale)", summary)
+
     def test_same_named_workflows_do_not_hide_a_failure(self):
         failed = run("test", conclusion="failure", run_id=1)
         passed = run("test", run_id=2)

@@ -34,6 +34,10 @@ on:
         description: 'Refresh every open PR after handling the triggering event. Required for a bounded caller queue.'
         type: boolean
         default: false
+      required_workflows:
+        description: 'Optional JSON array of {path, event, ref: head|merge}. ref binds Actions REST head_sha, not checkout SHA; PR merge checkouts commonly report head. Empty preserves legacy gating.'
+        type: string
+        default: '[]'
       persona_state:
         description: 'Private controller signal for the Grumpy review job.'
         type: string
@@ -82,6 +86,7 @@ jobs:
           PERSONA_STATE: ${{ inputs.persona_state }}
           PERSONA_PR: ${{ inputs.persona_pr }}
           REQUIRE_CI: ${{ inputs.reconcile_open }}
+          GATEKEEPER_REQUIRED_WORKFLOWS: ${{ inputs.required_workflows }}
         run: |
           # review_run_id is caller-supplied public API and --review-run is
           # type=int: any non-integer would kill the step on argparse's usage
