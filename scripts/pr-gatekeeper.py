@@ -565,7 +565,9 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
             publish_refs.update(ref for pr in prs
                                 for ref in (pr["head"]["sha"], pr.get("merge_commit_sha")) if ref)
             refs_complete = True
-            if persona_required:
+            # A malformed manifest still resolves destinations first and then
+            # re-raises below; its review reads would be discarded, so skip them.
+            if persona_required and entries is not None:
                 persona_checks = collect_persona_checks(repo, sha, token, prs)
         if entries is None:
             parse_required_workflows(required_workflows)
@@ -654,7 +656,7 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
 
 def reconcile_open(repo: str, token: str, dry_run: bool, sha: str | None = None,
                    review_run: int | None = None, persona_state: str = "", persona_pr: int = 0,
-                   required_workflows: str = "") -> int:
+                   required_workflows: str = "", require_ci: bool = False) -> int:
     """Handle the event and current PRs once per destination inventory.
 
     Tracking lasts only for this invocation. A fresh PR snapshot after the
@@ -675,7 +677,7 @@ def reconcile_open(repo: str, token: str, dry_run: bool, sha: str | None = None,
         key = (head, destinations)
         if key in evaluated:
             return
-        result = max(result, report(repo, head, token, dry_run, open_prs=prs,
+        result = max(result, report(repo, head, token, dry_run, open_prs=prs, require_ci=require_ci,
                                     persona_state=persona_state if signal and head == sha else "",
                                     persona_pr=persona_pr if signal and head == sha else 0, **contract_args))
         # Failed reads/publications still count as attempts and keep result=2.
@@ -688,7 +690,8 @@ def reconcile_open(repo: str, token: str, dry_run: bool, sha: str | None = None,
             for head in heads:
                 refresh(head, prs, signal=True)
         except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
-            result = max(result, report(repo, sha, token, dry_run, error=str(exc), **contract_args))
+            result = max(result, report(repo, sha, token, dry_run, error=str(exc),
+                                        require_ci=require_ci, **contract_args))
     try:
         prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
         for head in sorted({pr["head"]["sha"] for pr in prs}):
@@ -736,7 +739,8 @@ def main(argv: list[str]) -> int:
         parser.error("--review-run requires --sha as its blocking fallback")
     if args.reconcile_open:
         return reconcile_open(args.repo, token, args.dry_run, args.sha, args.review_run,
-                              args.persona_state, args.persona_pr, **contract_args)
+                              args.persona_state, args.persona_pr, **contract_args,
+                              require_ci=args.require_ci)
     if args.review_run:
         try:
             heads = resolve_review_heads(args.repo, args.review_run, token)

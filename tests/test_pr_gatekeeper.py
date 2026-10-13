@@ -1201,5 +1201,70 @@ class TestPublication(unittest.TestCase):
                     self.assertEqual("conclusion" in call.args[2], status == "completed")
 
 
+class TestRequireCiAndMalformedManifest(unittest.TestCase):
+    """`--require-ci` reaches every report() call, and a malformed manifest
+    still resolves destinations before its (now skipped) persona reads."""
+
+    def test_reconcile_open_forwards_require_ci_to_every_report(self):
+        # The reusable caller adds --require-ci and --reconcile-open together, so
+        # the flag must survive the reconciliation path, including its default
+        # when a caller omits it.
+        for require_ci, expected in ((True, True), (False, False)):
+            with self.subTest(require_ci=require_ci), \
+                 patch.object(pr_gatekeeper, "_list_all",
+                              return_value=[{"number": 1, "head": {"sha": "head"}}]), \
+                 patch.object(pr_gatekeeper, "report", return_value=0) as report_mock:
+                self.assertEqual(pr_gatekeeper.reconcile_open(
+                    "org/repo", "token", False, sha="head", require_ci=require_ci), 0)
+            self.assertEqual(report_mock.call_count, 1)
+            self.assertIs(report_mock.call_args.kwargs.get("require_ci"), expected)
+            self.assertEqual(report_mock.call_args.args[1], "head")
+
+    def test_reconcile_open_error_fallback_forwards_require_ci(self):
+        with patch.object(pr_gatekeeper, "_list_all", side_effect=ValueError("PR list unavailable")), \
+             patch.object(pr_gatekeeper, "report", return_value=2) as report_mock:
+            self.assertEqual(pr_gatekeeper.reconcile_open(
+                "org/repo", "token", False, sha="head", require_ci=True), 2)
+        error_calls = [c for c in report_mock.call_args_list if "error" in c.kwargs]
+        self.assertTrue(error_calls, "the read failure must post a blocking fallback")
+        self.assertTrue(all(c.kwargs.get("require_ci") is True for c in report_mock.call_args_list))
+
+    def test_main_reconcile_open_forwards_require_ci(self):
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
+             patch.object(pr_gatekeeper, "reconcile_open", return_value=0) as reconcile_mock:
+            self.assertEqual(pr_gatekeeper.main(
+                ["--repo", "org/repo", "--reconcile-open", "--require-ci"]), 0)
+        self.assertIs(reconcile_mock.call_args.kwargs.get("require_ci"), True)
+
+    def test_malformed_manifest_resolves_destinations_and_skips_discarded_review_reads(self):
+        import json
+        pr = {"number": 7, "head": {"sha": "head"}, "merge_commit_sha": "merge"}
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[pr], {"check_runs": []}]), \
+             patch.object(pr_gatekeeper, "collect_persona_checks") as persona, \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token",
+                                                  required_workflows="not JSON"), 2)
+        # The re-raised parse error discards review reads, so none may be made.
+        persona.assert_not_called()
+        self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {"head", "merge"})
+        self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_valid_manifest_still_reads_persona_reviews(self):
+        import json
+        pr = {"number": 7, "head": {"sha": "head"}, "merge_commit_sha": "merge"}
+        valid = json.dumps([{"path": ".github/workflows/test.yml",
+                             "event": "pull_request", "ref": "head"}])
+        with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[pr]]), \
+             patch.object(pr_gatekeeper, "collect_persona_checks", return_value=[]) as persona, \
+             patch.object(pr_gatekeeper, "collect", return_value=([], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "required_workflow_checks", return_value=[]), \
+             patch.object(pr_gatekeeper, "_post"):
+            self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token",
+                                                  required_workflows=valid, workflow_metadata={}), 0)
+        persona.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

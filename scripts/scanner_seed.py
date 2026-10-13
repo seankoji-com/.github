@@ -31,6 +31,12 @@ PIN_NAMES = ("PIN_PIP", "PIN_SEMGREP", "PIN_ZIZMOR", "PIN_SEMGREP_OTEL")
 
 
 def pins():
+    # Name the unset variables, never their values: a missing pin is a caller
+    # mistake the documented build/install CLI can hit, so it must surface as
+    # the module's controlled ValueError, not a bare KeyError traceback.
+    missing = [name for name in PIN_NAMES if name not in os.environ]
+    if missing:
+        raise ValueError("Missing scanner pin environment variable(s): " + ", ".join(missing))
     values = {name: os.environ[name] for name in PIN_NAMES}
     if not all(re.fullmatch(r"[0-9][a-zA-Z0-9.]*", v) for v in values.values()):
         raise ValueError("Invalid scanner pins")
@@ -180,6 +186,12 @@ def verify(seed, wanted):
         immutable(parent, directory=True, ancestor=True)
     immutable(seed, directory=True)
     manifest_path = seed / "manifest.json"
+    # A partially provisioned seed (the directory exists, the manifest does
+    # not) is a controlled failure, not a raw FileNotFoundError from lstat.
+    # probe/install must exit non-zero through ValueError so the workflow's
+    # probe step can decide cache_mode without a traceback.
+    if not os.path.lexists(manifest_path):
+        raise ValueError("Seed directory is missing manifest.json")
     immutable(manifest_path)
     manifest = json.loads(manifest_path.read_text(), object_pairs_hook=unique_object)
     if set(manifest) != {"schema_version", "identity", "wheels"} or manifest["schema_version"] != 1:

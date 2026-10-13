@@ -607,6 +607,78 @@ builtins.exec = fixture_exec
                 seed.verify(link, seed.identity("zizmor"))
 
 
+    def test_missing_pin_names_are_reported_without_disclosing_values(self):
+        # A documented manual build/install can hit an unset pin; it must be the
+        # module's controlled ValueError, naming the variable only.
+        env = {name: value for name, value in PINS.items() if name != "PIN_ZIZMOR"}
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ValueError, "PIN_ZIZMOR") as caught:
+                seed.pins()
+        message = str(caught.exception)
+        self.assertNotIn("KeyError", message)
+        for value in env.values():
+            self.assertNotIn(value, message)
+        with patch.dict(os.environ, PINS):
+            self.assertEqual(seed.pins(), PINS)
+
+    def test_empty_or_malformed_pins_are_rejected(self):
+        for value in ("", "1.2 beta", "v1.2", "1.2\n3", "1.2;rm"):
+            with self.subTest(value=value), patch.dict(os.environ, {**PINS, "PIN_PIP": value}):
+                with self.assertRaisesRegex(ValueError, "Invalid scanner pins"):
+                    seed.pins()
+
+    def test_partially_provisioned_seed_is_a_controlled_error(self):
+        # Seed directory present, manifest absent: must be ValueError, never a
+        # raw FileNotFoundError from lstat, so probe/install exit cleanly.
+        path, trust = self.fixture()
+        (path / "manifest.json").chmod(0o644)
+        path.chmod(0o755)
+        (path / "manifest.json").unlink()
+        path.chmod(0o555)
+        with patch.object(seed, "seed_path", return_value=path), \
+             patch.object(seed, "immutable", side_effect=trust), \
+             patch.object(seed, "pip_command") as pip, \
+             patch.object(seed.subprocess, "run") as run, \
+             redirect_stdout(io.StringIO()) as output:
+            with self.assertRaisesRegex(ValueError, r"manifest") as probe_error:
+                seed.probe("zizmor")
+            with self.assertRaisesRegex(ValueError, r"manifest"):
+                seed.install("zizmor", self.root / "venv")
+        self.assertNotIsInstance(probe_error.exception, FileNotFoundError)
+        self.assertEqual(output.getvalue(), "")
+        run.assert_not_called()
+        pip.assert_not_called()
+        self.remove_fixture(path)
+
+    def test_absent_or_symlinked_job_local_scanner_never_runs_or_publishes(self):
+        # The venv/bin/<tool> guard had no coverage: earlier interpreter,
+        # install and distribution checks all pass, then this branch fires.
+        # The install step runs under `set -euo pipefail` and appends to
+        # GITHUB_PATH only after this helper returns, so the ValueError must
+        # leave stdout empty and exit non-zero: no scanner path is published.
+        for case in ("absent", "symlink"):
+            with self.subTest(case=case):
+                path, trust = self.fixture()
+                venv = self.venv()
+                if case == "symlink":
+                    (venv / "bin" / "zizmor").symlink_to(sys.executable)
+                with patch.object(seed, "seed_path", return_value=path), \
+                     patch.object(seed, "immutable", side_effect=trust), \
+                     patch.object(seed, "pip_command") as pip, \
+                     patch.object(seed.subprocess, "run"), \
+                     patch.object(seed.subprocess, "check_output") as scanner, \
+                     redirect_stdout(io.StringIO()) as output:
+                    with self.assertRaisesRegex(ValueError, "Missing or symlinked job-local scanner"):
+                        seed.install("zizmor", venv)
+                scanner.assert_not_called()
+                self.assertEqual(output.getvalue(), "", "Nothing may be published before the guard")
+                self.assertEqual(
+                    [call[1] for call in (c.args for c in pip.call_args_list)],
+                    ["uninstall", "install", "check"],
+                )
+                self.remove_fixture(path)
+
+
 seed.immutable_original = seed.immutable
 
 
@@ -674,6 +746,17 @@ class SourceContractTests(unittest.TestCase):
                 self.assertIn('-venv/bin/python3" -I', step["run"])
                 self.assertNotIn("raw.githubusercontent", step["run"])
                 self.assertNotIn("scripts/scanner_seed.py", step["run"])
+
+    def test_install_publishes_scanner_path_only_after_a_successful_helper(self):
+        # A helper that raises ValueError (missing/symlinked scanner, partial
+        # seed) exits non-zero; `set -euo pipefail` then aborts the step before
+        # the GITHUB_PATH append, so no path is ever published on failure.
+        for job in yaml.safe_load(WORKFLOW.read_text())["jobs"].values():
+            install = next(s for s in job["steps"] if s.get("id") == "install")
+            run = install["run"]
+            self.assertIn("set -euo pipefail", run)
+            self.assertLess(run.index("exec(compile(source"), run.index("$GITHUB_PATH"))
+            self.assertEqual(run.count('>> "$GITHUB_PATH"'), 1)
 
     def test_complete_scopes_and_current_pins_advisory_and_hosted_isolation(self):
         document = yaml.safe_load(WORKFLOW.read_text())
