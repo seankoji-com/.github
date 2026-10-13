@@ -66,8 +66,8 @@ jobs:
         timeout-minutes: 1
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/scanner-pip-cache
-          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-semgrep-${{ env.PIN_SEMGREP }}-otel-${{ env.PIN_SEMGREP_OTEL }}-pip-${{ env.PIN_PIP }}
+          path: ${{ runner.temp }}/semgrep-pip-cache
+          key: scanner-pip-v2-${{ runner.environment }}-trusted-default-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-semgrep-${{ env.PIN_SEMGREP }}-otel-${{ env.PIN_SEMGREP_OTEL }}-zizmor-${{ env.PIN_ZIZMOR }}-pip-${{ env.PIN_PIP }}
 
       - name: Install Semgrep
         id: install
@@ -76,30 +76,19 @@ jobs:
         timeout-minutes: 5
         shell: bash
         env:
-          PIP_CACHE_DIR: ${{ runner.temp }}/scanner-pip-cache
+          PIP_CACHE_DIR: ${{ runner.temp }}/semgrep-pip-cache
         run: |
           set -euo pipefail
-          scanner_python="$RUNNER_TEMP/semgrep-venv/bin/python"
-          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==${PIN_PIP}"
-          # Match instrumentation to the SDK semgrep requires instead of
-          # backtracking newer releases.
-          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "semgrep==${PIN_SEMGREP}" \
-            "opentelemetry-instrumentation-requests==${PIN_SEMGREP_OTEL}" \
-            "opentelemetry-instrumentation-threading==${PIN_SEMGREP_OTEL}"
-          "$scanner_python" -m pip check
-          "$RUNNER_TEMP/semgrep-venv/bin/semgrep" --version
+          # Embedded canonical helper bytes avoid a mutable fetch or caller script.
+          python3 -I - "semgrep" "$RUNNER_TEMP/semgrep-venv" <<'PY'
+          import base64, gzip, hashlib, sys
+          source = gzip.decompress(base64.b64decode("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"))
+          assert hashlib.sha256(source).hexdigest() == "4cad9e415f8fb7af368de057aef61efde1acc211c05911d248522b2d19f98c3a", "Scanner helper checksum mismatch"
+          sys.argv = ["scanner_seed.py", "install", *sys.argv[1:]]
+          exec(compile(source, "scanner_seed.py", "exec"), {"__name__": "__main__"})
+          PY
           echo "$RUNNER_TEMP/semgrep-venv/bin" >> "$GITHUB_PATH"
 
-      - name: Save scanner downloads
-        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
-        continue-on-error: true
-        timeout-minutes: 1
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/scanner-pip-cache
-          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Run Semgrep scan
         id: scan
@@ -111,7 +100,7 @@ jobs:
           RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
           set -uo pipefail
-          semgrep scan --config p/security-audit --config p/secrets \
+          "$RUNNER_TEMP/semgrep-venv/bin/semgrep" scan --config p/security-audit --config p/secrets \
             --metrics=off --json --output "$RESULT_FILE" .
 
       # No bare `set -e`: this is the only step in the job not covered by
@@ -151,6 +140,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      - name: Save scanner downloads
+        if: success() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.install.outcome == 'success' && steps.scan.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/semgrep-pip-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
   zizmor:
     name: zizmor
     runs-on: ${{ fromJSON(inputs.runner-json) }}
@@ -182,8 +180,8 @@ jobs:
         timeout-minutes: 1
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/scanner-pip-cache
-          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-zizmor-${{ env.PIN_ZIZMOR }}-pip-${{ env.PIN_PIP }}
+          path: ${{ runner.temp }}/zizmor-pip-cache
+          key: scanner-pip-v2-${{ runner.environment }}-trusted-default-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-zizmor-${{ env.PIN_ZIZMOR }}-semgrep-${{ env.PIN_SEMGREP }}-otel-${{ env.PIN_SEMGREP_OTEL }}-pip-${{ env.PIN_PIP }}
 
       - name: Install zizmor
         id: install
@@ -192,26 +190,19 @@ jobs:
         timeout-minutes: 5
         shell: bash
         env:
-          PIP_CACHE_DIR: ${{ runner.temp }}/scanner-pip-cache
+          PIP_CACHE_DIR: ${{ runner.temp }}/zizmor-pip-cache
         run: |
           set -euo pipefail
-          scanner_python="$RUNNER_TEMP/zizmor-venv/bin/python"
-          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==${PIN_PIP}"
-          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "zizmor==${PIN_ZIZMOR}"
-          "$scanner_python" -m pip check
-          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" --version
+          # Embedded canonical helper bytes avoid a mutable fetch or caller script.
+          python3 -I - "zizmor" "$RUNNER_TEMP/zizmor-venv" <<'PY'
+          import base64, gzip, hashlib, sys
+          source = gzip.decompress(base64.b64decode("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"))
+          assert hashlib.sha256(source).hexdigest() == "4cad9e415f8fb7af368de057aef61efde1acc211c05911d248522b2d19f98c3a", "Scanner helper checksum mismatch"
+          sys.argv = ["scanner_seed.py", "install", *sys.argv[1:]]
+          exec(compile(source, "scanner_seed.py", "exec"), {"__name__": "__main__"})
+          PY
           echo "$RUNNER_TEMP/zizmor-venv/bin" >> "$GITHUB_PATH"
 
-      - name: Save scanner downloads
-        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
-        continue-on-error: true
-        timeout-minutes: 1
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/scanner-pip-cache
-          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       # No job-level `if: hashFiles(...)` guard here: that would evaluate
       # before checkout, always see an empty workspace, and silently disable
@@ -227,7 +218,7 @@ jobs:
           RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
           set -uo pipefail
-          zizmor --no-online-audits --format json .github/workflows > "$RESULT_FILE"
+          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" --no-online-audits --format json .github/workflows > "$RESULT_FILE"
 
       - name: Record scan outcome
         timeout-minutes: 1
@@ -262,3 +253,12 @@ jobs:
           path: ${{ steps.python.outputs.result }}
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Save scanner downloads
+        if: success() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.install.outcome == 'success' && steps.scan.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/zizmor-pip-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}

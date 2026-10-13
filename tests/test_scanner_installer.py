@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+import sys
 
 import yaml
 
@@ -21,7 +22,8 @@ class ScannerInstallerTests(unittest.TestCase):
         # Pins are defined once in workflow-level env; steps read them from there.
         cls.pins = document["env"]
 
-    def install(self, tool, *, pip_failure=False, scanner_failure=False):
+    def install(self, tool, *, pip_failure=False, scanner_failure=False,
+                pip_check_failure=False, wrong_version=False):
         with tempfile.TemporaryDirectory(prefix="scanner-install-") as directory:
             root = Path(directory)
             binary = root / f"{tool}-venv/bin"
@@ -32,12 +34,14 @@ class ScannerInstallerTests(unittest.TestCase):
             python = binary / "python"
             python.write_text(
                 '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CALL_LOG"\n'
-                '[ "$PIP_FAIL" = 0 ] || exit 17\n'
+                'case "$*" in *"-m pip"*) [ "$PIP_FAIL" = 0 ] || exit 17;; esac\n'
+                'case "$*" in *"pip check"*) [ "$CHECK_FAIL" = 0 ] || exit 18;; esac\n'
             )
             scanner = binary / tool
-            scanner.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SCANNER_LOG"\n[ "$SCANNER_FAIL" = 0 ] || exit 19\n')
+            scanner.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SCANNER_LOG"\n[ "$SCANNER_FAIL" = 0 ] || exit 19\nprintf "%s\\n" "$SCANNER_VERSION"\n')
             for file in (python, scanner):
                 file.chmod(0o755)
+            (binary / "python3").symlink_to(sys.executable)
             step = next(s for s in self.jobs[tool]["steps"] if s.get("id") == "install")
             result = subprocess.run(
                 [shutil.which("bash"), "-c", step["run"]],
@@ -45,12 +49,14 @@ class ScannerInstallerTests(unittest.TestCase):
                      "SCANNER_LOG": str(scanner_log),
                      "GITHUB_PATH": str(github_path), "CALL_LOG": str(log),
                      "PIP_FAIL": str(int(pip_failure)),
+                     "CHECK_FAIL": str(int(pip_check_failure)),
+                     "SCANNER_VERSION": "0.0.0" if wrong_version else self.pins['PIN_' + tool.upper()],
                      "SCANNER_FAIL": str(int(scanner_failure))},
                 capture_output=True, text=True, timeout=5,
             )
             if github_path.exists():
                 self.assertEqual(github_path.read_text(), f"{binary}\n")
-            if not pip_failure:
+            if not pip_failure and not pip_check_failure:
                 self.assertEqual(scanner_log.read_text().splitlines(), ["--version"])
             return result, log.read_text().splitlines(), (
                 github_path.read_text() if github_path.exists() else ""
@@ -61,15 +67,17 @@ class ScannerInstallerTests(unittest.TestCase):
             with self.subTest(tool=tool):
                 result, calls, path = self.install(tool)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(len(calls), 3)
-                self.assertIn(f"pip=={self.pins['PIN_PIP']}", calls[0])
-                self.assertIn(f"{tool}=={self.pins['PIN_' + tool.upper()]}", calls[1])
+                self.assertEqual(len(calls), 5)
+                self.assertIn("Not a job venv", calls[0])
+                self.assertIn(f"pip=={self.pins['PIN_PIP']}", calls[1])
+                self.assertIn(f"{tool}=={self.pins['PIN_' + tool.upper()]}", calls[2])
                 if tool == "semgrep":
                     otel = self.pins["PIN_SEMGREP_OTEL"]
                     for package in ("requests", "threading"):
-                        self.assertIn(f"opentelemetry-instrumentation-{package}=={otel}", calls[1])
-                self.assertEqual(calls[2], "-m pip check")
-                for call in calls[:2]:
+                        self.assertIn(f"opentelemetry-instrumentation-{package}=={otel}", calls[2])
+                self.assertEqual(calls[3], "-I -m pip check")
+                self.assertIn("importlib.metadata", calls[4])
+                for call in calls[1:3]:
                     self.assertIn("--timeout 30 --retries 2", call)
                     self.assertIn("--only-binary=:all:", call)
                     self.assertNotIn("--break-system-packages", call)
@@ -81,7 +89,7 @@ class ScannerInstallerTests(unittest.TestCase):
             with self.subTest(tool=tool):
                 result, calls, path = self.install(tool, pip_failure=True)
                 self.assertEqual(result.returncode, 17)
-                self.assertEqual(len(calls), 1)
+                self.assertEqual(len(calls), 2)
                 self.assertEqual(path, "")
 
     def test_broken_installed_executable_is_not_published(self):
@@ -90,6 +98,14 @@ class ScannerInstallerTests(unittest.TestCase):
                 result, _, path = self.install(tool, scanner_failure=True)
                 self.assertEqual(result.returncode, 19)
                 self.assertEqual(path, "")
+
+    def test_wrong_version_or_pip_check_failure_never_publishes_scanner(self):
+        for tool in self.jobs:
+            for options in ({"wrong_version": True}, {"pip_check_failure": True}):
+                with self.subTest(tool=tool, options=options):
+                    result, _, path = self.install(tool, **options)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(path, "")
 
     def test_failed_install_cannot_run_scan_and_each_network_phase_is_bounded(self):
         for job in self.jobs.values():
@@ -114,8 +130,12 @@ class ScannerInstallerTests(unittest.TestCase):
             self.assertEqual(install["env"]["PIP_CACHE_DIR"], cache["with"]["path"])
             self.assertEqual(save["with"]["path"], cache["with"]["path"])
             self.assertEqual(save["with"]["key"], "${{ steps.cache.outputs.cache-primary-key }}")
-            self.assertEqual(save["if"], "steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''")
-            self.assertEqual(cache["with"]["path"], "${{ runner.temp }}/scanner-pip-cache")
+            self.assertEqual(save["if"], "success() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.install.outcome == 'success' && steps.scan.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''")
+            scan = next(s for s in job["steps"] if s.get("id") == "scan")
+            self.assertGreater(job["steps"].index(save), job["steps"].index(scan))
+            self.assertEqual(cache["with"]["path"], "${{ runner.temp }}/" + tool + "-pip-cache")
+            self.assertNotIn("restore-keys", cache["with"])
+            self.assertIn("runner.environment", cache["with"]["key"])
             for dimension in ("runner.os", "runner.arch", "steps.python.outputs.version", tool):
                 self.assertIn(dimension, cache["with"]["key"])
 
@@ -182,6 +202,11 @@ class ScannerInstallerTests(unittest.TestCase):
                 ("", "", [], "NO-OUTPUT"),
                 ("success", "", [], "NO-OUTPUT"),
                 ("success", "skipped", [], "NO-OUTPUT"),
+                ("cancelled", "success", [], "NO-OUTPUT"),
+                ("success", "cancelled", [], "NO-OUTPUT"),
+                ("failure", "failure", [], "NO-OUTPUT"),
+                ("success", "success", None, "NO-OUTPUT"),
+                ("success", "failure", None, "NO-OUTPUT"),
                 ("success", "failure", "malformed", "NO-OUTPUT"),
                 ("success", "success", {"bad": 1}, "NO-OUTPUT"),
                 ("success", "success", [], "SCANNED: 0"),

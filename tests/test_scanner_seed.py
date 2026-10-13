@@ -1,0 +1,431 @@
+"""Offline seed fixtures: real pip, synthetic scanner wheels, no real scans."""
+
+import base64
+import gzip
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+import zipfile
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = ROOT / "scripts/scanner_seed.py"
+spec = importlib.util.spec_from_file_location("scanner_seed", SOURCE)
+seed = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(seed)
+WORKFLOW = ROOT / ".github/workflows/reusable-static-analysis.yml"
+PINS = yaml.safe_load(WORKFLOW.read_text())["env"]
+
+
+def wheel(directory, name, version, *, dependencies=(), scanner=False, wrong_version=False, pip_source=None):
+    """Write a valid pure-Python wheel without build tools/network."""
+    module = name.replace("-", "_")
+    info = f"{module}-{version}.dist-info"
+    files = {
+        f"{info}/METADATA": (f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
+                              + "".join(f"Requires-Dist: {d}\n" for d in dependencies)).encode(),
+        f"{info}/WHEEL": b"Wheel-Version: 1.0\nGenerator: fixture\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        f"{module}/__init__.py": b"",
+    }
+    if pip_source:
+        for path in pip_source.rglob("*"):
+            if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
+                files["pip/" + path.relative_to(pip_source).as_posix()] = path.read_bytes()
+        # The fixture uses real pip code and pins its distribution and CLI version.
+        files["pip/__init__.py"] = re.sub(rb'__version__ = "[^"]+"',
+                                          f'__version__ = "{version}"'.encode(), files["pip/__init__.py"])
+    if scanner:
+        shown = "0.0.0" if wrong_version else version
+        files[f"{module}/__init__.py"] = f'def main():\n    print("{name} {shown}")\n'.encode()
+        files[f"{info}/entry_points.txt"] = f"[console_scripts]\n{name} = {module}:main\n".encode()
+    files[f"{info}/RECORD"] = "".join(f"{p},,\n" for p in [*files, f"{info}/RECORD"]).encode()
+    path = directory / f"{module}-{version}-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for filename, content in files.items():
+            archive.writestr(filename, content)
+    return path
+
+
+class SeedTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix="scanner-fixture-")
+        cls.root = Path(cls.temp.name)
+        # Copy an already installed pip; there are no downloads or host installs.
+        bootstrap = cls.root / "bootstrap"
+        subprocess.run([sys.executable, "-I", "-m", "venv", str(bootstrap)], check=True, timeout=30)
+        cls.python = bootstrap / "bin/python"
+        result = subprocess.run([str(cls.python), "-I", "-c", "import pip; print(pip.__path__[0])"],
+                                check=True, capture_output=True, text=True)
+        cls.pip_source = Path(result.stdout.strip())
+        cls.base = cls.root / "base"
+        cls.base.mkdir()
+        wheel(cls.base, "pip", PINS["PIN_PIP"], pip_source=cls.pip_source)
+        wheel(cls.base, "fixture-dep", "2.0")
+        for tool in ("semgrep", "zizmor"):
+            house = cls.root / (tool + "-house")
+            shutil.copytree(cls.base, house)
+            wheel(house, tool, PINS["PIN_" + tool.upper()], dependencies=("fixture-dep==2.0",), scanner=True)
+            if tool == "semgrep":
+                for name in ("requests", "threading"):
+                    wheel(house, "opentelemetry-instrumentation-" + name, PINS["PIN_SEMGREP_OTEL"])
+            output = cls.root / (tool + "-seed")
+            with patch.dict(os.environ, PINS), patch.object(seed.platform, "system", return_value="Linux"), \
+                 patch.object(seed.sys, "executable", str(cls.python)):
+                seed.build(tool, house, output)
+            evidence = os.environ.get("SCANNER_TEST_EVIDENCE")
+            if evidence:
+                Path(evidence, f"scanner-fixture-{tool}-manifest.json").write_text((output / "manifest.json").read_text())
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temp.cleanup()
+
+    def setUp(self):
+        self.work = tempfile.TemporaryDirectory(prefix="scanner-consume-")
+        self.addCleanup(self.work.cleanup)
+        self.root = Path(self.work.name)
+        self.start_env = patch.dict(os.environ, {**PINS, "PIP_CONFIG_FILE": os.devnull,
+                                               "PIP_CACHE_DIR": str(self.root / "pip-cache"),
+                                               "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
+        self.start_env.start()
+        self.addCleanup(self.start_env.stop)
+        self.start_os = patch.object(seed.platform, "system", return_value="Linux")
+        self.start_os.start()
+        self.addCleanup(self.start_os.stop)
+
+    def fixture(self, tool="zizmor"):
+        path = self.root / "seed"
+        shutil.copytree(self.__class__.root / (tool + "-seed"), path)
+        for entry in [path, *path.rglob("*")]:
+            entry.chmod(0o555 if entry.is_dir() else 0o444)
+        # Unit tests cannot chown root or make /tmp's ancestors immutable. Model
+        # only that image trust boundary here; test every production stat check
+        # independently below. File types/modes/content are otherwise real.
+        def trusted_fixture(entry, *, directory=False, ancestor=False):
+            if ancestor:
+                return
+            info = entry.lstat()
+            info = type("RootStat", (), {"st_uid": 0, "st_mode": info.st_mode})()
+            with patch.object(Path, "lstat", return_value=info):
+                seed.immutable_original(entry, directory=directory)
+        return path, trusted_fixture
+
+    def venv(self):
+        path = self.root / "job-venv"
+        subprocess.run([sys.executable, "-I", "-m", "venv", "--clear", str(path)],
+                       check=True, timeout=30, capture_output=True)
+        return path
+
+    def consume(self, path, trust, tool="zizmor"):
+        with patch.object(seed, "seed_path", return_value=path), patch.object(seed, "immutable", side_effect=trust):
+            seed.install(tool, self.venv())
+
+    def rewrite(self, path, change):
+        target = path / "manifest.json"
+        manifest = json.loads(target.read_text())
+        change(manifest)
+        target.chmod(0o644)
+        target.write_text(json.dumps(manifest))
+        target.chmod(0o444)
+
+    def remove_fixture(self, path):
+        for entry in [path, *path.rglob("*")]:
+            if not entry.is_symlink() and entry.is_dir():
+                entry.chmod(0o755)
+        shutil.rmtree(path)
+
+    def test_valid_offline_seed_real_pip_both_tools(self):
+        for tool in ("semgrep", "zizmor"):
+            with self.subTest(tool=tool), tempfile.TemporaryDirectory() as temp:
+                path = Path(temp) / "seed"
+                original, trust = self.fixture(tool)
+                shutil.copytree(original, path)
+                # Trap attempted network activity as a subprocess requirement:
+                # every installation must be no-index; exact closure is verified
+                # by real pip and importlib.metadata in a fresh cleared venv.
+                real = seed.pip_command
+                calls = []
+                def run(python, *args):
+                    calls.append(args)
+                    if args[0] == "install":
+                        self.assertIn("--no-index", args)
+                        self.assertIn("--require-hashes", args)
+                    return real(python, *args)
+                with patch.object(seed, "pip_command", side_effect=run), \
+                     patch.dict(os.environ, {"PIP_FIND_LINKS": "https://example.invalid/ambient/",
+                                             "PIP_TARGET": str(self.root / "ambient-target")}):
+                    self.consume(path, trust, tool)
+                self.assertFalse((self.root / "ambient-target").exists())
+                self.assertEqual([c[0] for c in calls], ["uninstall", "install", "check"])
+                self.remove_fixture(original)
+
+    def test_pin_abi_platform_arch_tool_mismatch_retains_bounded_fallback(self):
+        for field in ("pins", "abi", "os", "arch", "tool"):
+            with self.subTest(field=field):
+                path, trust = self.fixture()
+                self.rewrite(path, lambda m: m["identity"].update(
+                    {field: {**PINS, "PIN_PIP": "0.0"} if field == "pins" else "mismatch"}))
+                calls = []
+                with patch.object(seed, "seed_path", return_value=path), patch.object(seed, "immutable", side_effect=trust), \
+                     patch.object(seed, "pip_command", side_effect=lambda py, *a: calls.append(a)), \
+                     patch.object(seed.subprocess, "run"), patch.object(seed.subprocess, "check_output", return_value="zizmor " + PINS["PIN_ZIZMOR"]), \
+                     patch.object(Path, "is_file", return_value=True):
+                    seed.install("zizmor", self.root / "venv")
+                self.assertEqual([c[0] for c in calls], ["install", "install", "check"])
+                for call in calls[:2]:
+                    self.assertIn("--timeout", call)
+                    self.assertIn("--retries", call)
+                    self.assertIn("--only-binary=:all:", call)
+                    self.assertNotIn("--no-index", call)
+                self.assertIn("pip==" + PINS["PIN_PIP"], calls[0])
+                self.assertIn("zizmor==" + PINS["PIN_ZIZMOR"], calls[1])
+                self.remove_fixture(path)
+
+    def test_absent_seed_fallback_and_failed_download_propagate(self):
+        with patch.object(seed, "seed_path", return_value=self.root / "absent"), \
+             patch.object(seed.subprocess, "run"), \
+             patch.object(seed, "pip_command", side_effect=subprocess.CalledProcessError(17, ["pip"])) as run:
+            with self.assertRaises(subprocess.CalledProcessError):
+                seed.install("zizmor", self.root / "venv")
+        self.assertEqual(run.call_count, 1)
+
+    def test_corrupt_matching_seed_never_installs_or_falls_back(self):
+        for case in ("empty", "duplicate", "missing", "extra", "bytes", "requirements", "wrong-pin", "symlink", "writable"):
+            with self.subTest(case=case):
+                path, trust = self.fixture()
+                wheels = path / "wheels"
+                first = next(wheels.iterdir())
+                if case == "empty":
+                    self.rewrite(path, lambda m: m.update(wheels=[]))
+                elif case == "duplicate":
+                    self.rewrite(path, lambda m: m["wheels"].append(m["wheels"][0]))
+                elif case == "wrong-pin":
+                    self.rewrite(path, lambda m: m.update(wheels=[r for r in m["wheels"] if r["name"] != "pip"]))
+                elif case == "missing":
+                    wheels.chmod(0o755)
+                    first.unlink()
+                    wheels.chmod(0o555)
+                elif case == "extra":
+                    wheels.chmod(0o755)
+                    (wheels / "extra.whl").write_bytes(first.read_bytes())
+                    wheels.chmod(0o555)
+                elif case in {"bytes", "writable"}:
+                    first.chmod(0o644)
+                    if case == "bytes":
+                        first.write_bytes(first.read_bytes() + b"changed")
+                        first.chmod(0o444)
+                elif case == "requirements":
+                    (path / "requirements.txt").chmod(0o644)
+                    (path / "requirements.txt").write_text("")
+                    (path / "requirements.txt").chmod(0o444)
+                elif case == "symlink":
+                    wheels.chmod(0o755)
+                    target = self.root / "target"
+                    target.write_bytes(first.read_bytes())
+                    first.unlink()
+                    first.symlink_to(target)
+                    wheels.chmod(0o555)
+                with patch.object(seed, "pip_command") as run, \
+                     patch.object(seed, "seed_path", return_value=path), patch.object(seed, "immutable", side_effect=trust):
+                    with self.assertRaises((ValueError, FileNotFoundError)):
+                        seed.install("zizmor", self.root / "venv")
+                run.assert_not_called()
+                self.remove_fixture(path)
+
+    def test_incomplete_dependency_closure_fails_real_offline_install(self):
+        path, trust = self.fixture()
+        manifest = json.loads((path / "manifest.json").read_text())
+        removed = next(r for r in manifest["wheels"] if r["name"] == "fixture-dep")
+        self.rewrite(path, lambda m: m.update(wheels=[r for r in m["wheels"] if r != removed]))
+        (path / "wheels").chmod(0o755)
+        (path / "wheels" / removed["file"]).unlink()
+        (path / "wheels").chmod(0o555)
+        req = path / "requirements.txt"
+        req.chmod(0o644)
+        req.write_text(seed.requirements([r for r in manifest["wheels"] if r != removed]))
+        req.chmod(0o444)
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.consume(path, trust)
+
+    def test_build_rejects_empty_extra_duplicate_incomplete_and_url_wheels(self):
+        for case in ("empty", "extra", "duplicate", "incomplete", "url"):
+            with self.subTest(case=case):
+                house = self.root / case
+                shutil.copytree(self.__class__.root / "zizmor-house", house)
+                if case == "empty":
+                    shutil.rmtree(house)
+                    house.mkdir()
+                elif case == "extra":
+                    wheel(house, "extra", "1.0")
+                elif case == "duplicate":
+                    wheel(house, "fixture-dep", "3.0")
+                elif case == "incomplete":
+                    next(house.glob("fixture_dep-*.whl")).unlink()
+                else:
+                    wheel(house, "extra", "1.0", dependencies=("remote @ https://example.invalid/remote.whl",))
+                with self.assertRaises((ValueError, subprocess.CalledProcessError)), \
+                     patch.object(seed.sys, "executable", str(self.python)):
+                    seed.build("zizmor", house, self.root / (case + "-out"))
+
+    def test_stat_boundary_rejects_nonroot_writable_and_symlink_files_and_parents(self):
+        for uid, mode, directory, ancestor in (
+            (1, stat.S_IFREG | 0o444, False, False),
+            (0, stat.S_IFREG | 0o644, False, False),
+            (0, stat.S_IFLNK | 0o444, False, False),
+            (0, stat.S_IFDIR | 0o755, True, False),
+            (0, stat.S_IFDIR | 0o777, True, True),
+            (1, stat.S_IFDIR | 0o755, True, True),
+            (0, stat.S_IFLNK | 0o755, True, True),
+        ):
+            with self.subTest(uid=uid, mode=mode, ancestor=ancestor):
+                info = type("Stat", (), {"st_uid": uid, "st_mode": mode})()
+                with patch.object(Path, "lstat", return_value=info):
+                    with self.assertRaises(ValueError):
+                        seed.immutable(Path("/seed"), directory=directory, ancestor=ancestor)
+
+    def test_no_ambient_scanner_or_venv_is_accepted(self):
+        path, trust = self.fixture()
+        with patch.object(seed, "seed_path", return_value=path), patch.object(seed, "immutable", side_effect=trust), \
+             patch.object(seed, "pip_command"), patch.object(seed.subprocess, "run", side_effect=subprocess.CalledProcessError(1, ["version-check"])), \
+             patch.object(seed.subprocess, "check_output") as scanner:
+            with self.assertRaises(subprocess.CalledProcessError):
+                seed.install("zizmor", self.root / "venv")
+        scanner.assert_not_called()
+
+    def test_system_interpreter_is_rejected_before_any_pip(self):
+        path, trust = self.fixture()
+        venv = self.root / "ambient-venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin/python").symlink_to(sys.executable)
+        with patch.object(seed, "seed_path", return_value=path), patch.object(seed, "immutable", side_effect=trust), \
+             patch.object(seed, "pip_command") as pip:
+            with self.assertRaises(subprocess.CalledProcessError):
+                seed.install("zizmor", venv)
+        pip.assert_not_called()
+
+    def test_wrong_scanner_version_fails_after_real_offline_install(self):
+        path, trust = self.fixture()
+        house = self.root / "wrong-version-house"
+        shutil.copytree(self.__class__.root / "zizmor-house", house)
+        wheel(house, "zizmor", PINS["PIN_ZIZMOR"], dependencies=("fixture-dep==2.0",),
+              scanner=True, wrong_version=True)
+        self.remove_fixture(path)
+        with patch.object(seed.sys, "executable", str(self.python)):
+            seed.build("zizmor", house, path)
+        for entry in [path, *path.rglob("*")]:
+            entry.chmod(0o555 if entry.is_dir() else 0o444)
+        with self.assertRaisesRegex(ValueError, "version mismatch"):
+            self.consume(path, trust)
+
+    def test_duplicate_manifest_keys_path_escape_and_seed_symlink_fail(self):
+        path, trust = self.fixture()
+        self.rewrite(path, lambda m: m["wheels"][0].update(file="../outside.whl"))
+        with patch.object(seed, "immutable", side_effect=trust):
+            with self.assertRaisesRegex(ValueError, "Invalid wheel path"):
+                seed.verify(path, seed.identity("zizmor"))
+        self.remove_fixture(path)
+        path, trust = self.fixture()
+        manifest = path / "manifest.json"
+        manifest.chmod(0o644)
+        manifest.write_text('{"schema_version": 1, "schema_version": 1}')
+        manifest.chmod(0o444)
+        with patch.object(seed, "immutable", side_effect=trust):
+            with self.assertRaisesRegex(ValueError, "Duplicate manifest field"):
+                seed.verify(path, seed.identity("zizmor"))
+        link = self.root / "linked-seed"
+        link.symlink_to(path)
+        with patch.object(seed, "immutable", side_effect=trust):
+            with self.assertRaises(ValueError):
+                seed.verify(link, seed.identity("zizmor"))
+
+
+seed.immutable_original = seed.immutable
+
+
+class SourceContractTests(unittest.TestCase):
+    def test_cache_save_actual_condition_only_allows_successful_default_pushes(self):
+        for job in yaml.safe_load(WORKFLOW.read_text())["jobs"].values():
+            save = next(s for s in job["steps"] if "actions/cache/save@" in s.get("uses", ""))
+            for success, event, branch, default, installed, cache_hit, cache_key, expected in (
+                (True, "push", "main", "main", "success", "false", "key", True),
+                (True, "push", "trunk", "trunk", "success", "false", "key", True),
+                (True, "pull_request", "main", "main", "success", "false", "key", False),
+                (True, "pull_request_target", "main", "main", "success", "false", "key", False),
+                (True, "workflow_dispatch", "main", "main", "success", "false", "key", False),
+                (True, "push", "feature", "main", "success", "false", "key", False),
+                (False, "push", "main", "main", "success", "false", "key", False),
+                (True, "push", "main", "main", "failure", "false", "key", False),
+                (True, "push", "main", "main", "cancelled", "false", "key", False),
+                (True, "push", "main", "main", "success", "true", "key", False),
+                (True, "push", "main", "main", "success", "false", "", False),
+            ):
+                values = {"success()": success, "github.event_name": event,
+                          "github.ref": "refs/heads/" + branch,
+                          "github.event.repository.default_branch": default,
+                          "steps.install.outcome": installed,
+                          "steps.scan.outcome": "success",
+                          "steps.cache.outputs.cache-hit": cache_hit,
+                          "steps.cache.outputs.cache-primary-key": cache_key}
+                expr = save["if"].replace("&&", " and ")
+                for name in sorted(values, key=len, reverse=True):
+                    expr = expr.replace(name, repr(values[name]))
+                # Only this trusted workflow's limited condition grammar executes.
+                self.assertEqual(eval(expr, {"__builtins__": {}, "format": lambda s, v: s.format(v)}), expected)
+            for outcome in ("failure", "cancelled", "skipped", ""):
+                expr = save["if"].replace("&&", " and ")
+                values.update({"success()": True, "github.event_name": "push",
+                               "github.ref": "refs/heads/main", "github.event.repository.default_branch": "main",
+                               "steps.install.outcome": "success", "steps.scan.outcome": outcome,
+                               "steps.cache.outputs.cache-hit": "false", "steps.cache.outputs.cache-primary-key": "key"})
+                for name in sorted(values, key=len, reverse=True):
+                    expr = expr.replace(name, repr(values[name]))
+                self.assertFalse(eval(expr, {"__builtins__": {}, "format": lambda s, v: s.format(v)}))
+
+    def test_embedded_helper_is_exact_checksum_verified_source_for_every_job(self):
+        jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+        for job in jobs.values():
+            step = next(s for s in job["steps"] if s.get("id") == "install")
+            encoded = re.search(r'base64.b64decode\("([A-Za-z0-9+/=]+)"\)', step["run"]).group(1)
+            source = gzip.decompress(base64.b64decode(encoded))
+            self.assertEqual(source, SOURCE.read_bytes())
+            self.assertIn(hashlib.sha256(source).hexdigest(), step["run"])
+            self.assertIn("python3 -I", step["run"])
+            self.assertNotIn("raw.githubusercontent", step["run"])
+            self.assertNotIn("scripts/scanner_seed.py", step["run"])
+
+    def test_complete_scopes_and_current_pins_advisory_and_hosted_isolation(self):
+        document = yaml.safe_load(WORKFLOW.read_text())
+        self.assertEqual(document["env"], {"PIN_PIP": "25.2", "PIN_SEMGREP": "1.176.0",
+                                           "PIN_SEMGREP_OTEL": "0.58b0", "PIN_ZIZMOR": "1.30.0"})
+        self.assertEqual(document["permissions"], {"contents": "read"})
+        self.assertEqual(document[True]["workflow_call"]["inputs"]["runner-json"]["default"], '["ubuntu-latest"]')
+        for tool, job in document["jobs"].items():
+            self.assertEqual(job["runs-on"], "${{ fromJSON(inputs.runner-json) }}")
+            scan = next(s for s in job["steps"] if s.get("id") == "scan")
+            install = next(s for s in job["steps"] if s.get("id") == "install")
+            self.assertTrue(install["continue-on-error"])
+            self.assertTrue(scan["continue-on-error"])
+            self.assertIn(f'"$RUNNER_TEMP/{tool}-venv/bin/{tool}"', scan["run"])
+            self.assertNotRegex(scan["run"], r"--exclude|--include|--disable|head |grep ")
+            if tool == "semgrep":
+                self.assertIn("--config p/security-audit --config p/secrets", scan["run"])
+                self.assertIn('--metrics=off --json --output "$RESULT_FILE" .', scan["run"])
+                self.assertEqual(scan["env"]["SEMGREP_SEND_METRICS"], "off")
+            else:
+                self.assertIn('--no-online-audits --format json .github/workflows > "$RESULT_FILE"', scan["run"])
+
+
+if __name__ == "__main__":
+    unittest.main()
