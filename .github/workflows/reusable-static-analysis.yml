@@ -59,47 +59,57 @@ jobs:
           result_dir="$(mktemp -d "$RUNNER_TEMP/semgrep-results.XXXXXX")"
           echo "result=$result_dir/results.json" >> "$GITHUB_OUTPUT"
 
+      - name: Probe immutable scanner seed
+        id: seed
+        if: steps.python.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Publish a mode only after complete read-only verification succeeds.
+          cache_mode="$(
+          # Embedded canonical helper bytes avoid a mutable fetch or caller script.
+          "$RUNNER_TEMP/semgrep-venv/bin/python3" -I -B - "semgrep" <<'PY'
+          import base64, gzip, hashlib, sys
+          source = gzip.decompress(base64.b64decode("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"))
+          assert hashlib.sha256(source).hexdigest() == "7e909bcc76d2eb19da3776bdb81e8b37f03f6d25aef57204ec1206836cfd9878", "Scanner helper checksum mismatch"
+          sys.argv = ["scanner_seed.py", "probe", *sys.argv[1:]]
+          exec(compile(source, "scanner_seed.py", "exec"), {"__name__": "__main__"})
+          PY
+          )"
+          printf '%s\n' "$cache_mode" >> "$GITHUB_OUTPUT"
+
       - name: Restore scanner downloads
         id: cache
-        if: steps.python.outcome == 'success'
+        if: steps.seed.outcome == 'success' && steps.seed.outputs.cache_mode == 'fallback'
         continue-on-error: true
         timeout-minutes: 1
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/scanner-pip-cache
-          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-semgrep-${{ env.PIN_SEMGREP }}-otel-${{ env.PIN_SEMGREP_OTEL }}-pip-${{ env.PIN_PIP }}
+          path: ${{ runner.temp }}/semgrep-pip-cache
+          key: scanner-pip-v2-${{ runner.environment }}-trusted-default-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-semgrep-${{ env.PIN_SEMGREP }}-otel-${{ env.PIN_SEMGREP_OTEL }}-zizmor-${{ env.PIN_ZIZMOR }}-pip-${{ env.PIN_PIP }}
 
       - name: Install Semgrep
         id: install
-        if: steps.python.outcome == 'success'
+        if: steps.python.outcome == 'success' && steps.seed.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 5
         shell: bash
         env:
-          PIP_CACHE_DIR: ${{ runner.temp }}/scanner-pip-cache
+          PIP_CACHE_DIR: ${{ runner.temp }}/semgrep-pip-cache
         run: |
           set -euo pipefail
-          scanner_python="$RUNNER_TEMP/semgrep-venv/bin/python"
-          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==${PIN_PIP}"
-          # Match instrumentation to the SDK semgrep requires instead of
-          # backtracking newer releases.
-          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "semgrep==${PIN_SEMGREP}" \
-            "opentelemetry-instrumentation-requests==${PIN_SEMGREP_OTEL}" \
-            "opentelemetry-instrumentation-threading==${PIN_SEMGREP_OTEL}"
-          "$scanner_python" -m pip check
-          "$RUNNER_TEMP/semgrep-venv/bin/semgrep" --version
+          # Embedded canonical helper bytes avoid a mutable fetch or caller script.
+          "$RUNNER_TEMP/semgrep-venv/bin/python3" -I -B - "semgrep" "$RUNNER_TEMP/semgrep-venv" <<'PY'
+          import base64, gzip, hashlib, sys
+          source = gzip.decompress(base64.b64decode("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"))
+          assert hashlib.sha256(source).hexdigest() == "7e909bcc76d2eb19da3776bdb81e8b37f03f6d25aef57204ec1206836cfd9878", "Scanner helper checksum mismatch"
+          sys.argv = ["scanner_seed.py", "install", *sys.argv[1:]]
+          exec(compile(source, "scanner_seed.py", "exec"), {"__name__": "__main__"})
+          PY
           echo "$RUNNER_TEMP/semgrep-venv/bin" >> "$GITHUB_PATH"
 
-      - name: Save scanner downloads
-        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
-        continue-on-error: true
-        timeout-minutes: 1
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/scanner-pip-cache
-          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       - name: Run Semgrep scan
         id: scan
@@ -111,7 +121,7 @@ jobs:
           RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
           set -uo pipefail
-          semgrep scan --config p/security-audit --config p/secrets \
+          "$RUNNER_TEMP/semgrep-venv/bin/semgrep" scan --config p/security-audit --config p/secrets \
             --metrics=off --json --output "$RESULT_FILE" .
 
       # No bare `set -e`: this is the only step in the job not covered by
@@ -151,6 +161,15 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      - name: Save scanner downloads
+        if: success() && steps.seed.outcome == 'success' && steps.seed.outputs.cache_mode == 'fallback' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.install.outcome == 'success' && steps.scan.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/semgrep-pip-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
   zizmor:
     name: zizmor
     runs-on: ${{ fromJSON(inputs.runner-json) }}
@@ -175,43 +194,57 @@ jobs:
           result_dir="$(mktemp -d "$RUNNER_TEMP/zizmor-results.XXXXXX")"
           echo "result=$result_dir/results.json" >> "$GITHUB_OUTPUT"
 
+      - name: Probe immutable scanner seed
+        id: seed
+        if: steps.python.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Publish a mode only after complete read-only verification succeeds.
+          cache_mode="$(
+          # Embedded canonical helper bytes avoid a mutable fetch or caller script.
+          "$RUNNER_TEMP/zizmor-venv/bin/python3" -I -B - "zizmor" <<'PY'
+          import base64, gzip, hashlib, sys
+          source = gzip.decompress(base64.b64decode("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"))
+          assert hashlib.sha256(source).hexdigest() == "7e909bcc76d2eb19da3776bdb81e8b37f03f6d25aef57204ec1206836cfd9878", "Scanner helper checksum mismatch"
+          sys.argv = ["scanner_seed.py", "probe", *sys.argv[1:]]
+          exec(compile(source, "scanner_seed.py", "exec"), {"__name__": "__main__"})
+          PY
+          )"
+          printf '%s\n' "$cache_mode" >> "$GITHUB_OUTPUT"
+
       - name: Restore scanner downloads
         id: cache
-        if: steps.python.outcome == 'success'
+        if: steps.seed.outcome == 'success' && steps.seed.outputs.cache_mode == 'fallback'
         continue-on-error: true
         timeout-minutes: 1
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/scanner-pip-cache
-          key: scanner-pip-v1-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-zizmor-${{ env.PIN_ZIZMOR }}-pip-${{ env.PIN_PIP }}
+          path: ${{ runner.temp }}/zizmor-pip-cache
+          key: scanner-pip-v2-${{ runner.environment }}-trusted-default-${{ runner.os }}-${{ runner.arch }}-py${{ steps.python.outputs.version }}-zizmor-${{ env.PIN_ZIZMOR }}-semgrep-${{ env.PIN_SEMGREP }}-otel-${{ env.PIN_SEMGREP_OTEL }}-pip-${{ env.PIN_PIP }}
 
       - name: Install zizmor
         id: install
-        if: steps.python.outcome == 'success'
+        if: steps.python.outcome == 'success' && steps.seed.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 5
         shell: bash
         env:
-          PIP_CACHE_DIR: ${{ runner.temp }}/scanner-pip-cache
+          PIP_CACHE_DIR: ${{ runner.temp }}/zizmor-pip-cache
         run: |
           set -euo pipefail
-          scanner_python="$RUNNER_TEMP/zizmor-venv/bin/python"
-          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "pip==${PIN_PIP}"
-          "$scanner_python" -m pip install --disable-pip-version-check --no-input \
-            --progress-bar off --timeout 30 --retries 2 --only-binary=:all: "zizmor==${PIN_ZIZMOR}"
-          "$scanner_python" -m pip check
-          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" --version
+          # Embedded canonical helper bytes avoid a mutable fetch or caller script.
+          "$RUNNER_TEMP/zizmor-venv/bin/python3" -I -B - "zizmor" "$RUNNER_TEMP/zizmor-venv" <<'PY'
+          import base64, gzip, hashlib, sys
+          source = gzip.decompress(base64.b64decode("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"))
+          assert hashlib.sha256(source).hexdigest() == "7e909bcc76d2eb19da3776bdb81e8b37f03f6d25aef57204ec1206836cfd9878", "Scanner helper checksum mismatch"
+          sys.argv = ["scanner_seed.py", "install", *sys.argv[1:]]
+          exec(compile(source, "scanner_seed.py", "exec"), {"__name__": "__main__"})
+          PY
           echo "$RUNNER_TEMP/zizmor-venv/bin" >> "$GITHUB_PATH"
 
-      - name: Save scanner downloads
-        if: steps.install.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
-        continue-on-error: true
-        timeout-minutes: 1
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ runner.temp }}/scanner-pip-cache
-          key: ${{ steps.cache.outputs.cache-primary-key }}
 
       # No job-level `if: hashFiles(...)` guard here: that would evaluate
       # before checkout, always see an empty workspace, and silently disable
@@ -227,7 +260,7 @@ jobs:
           RESULT_FILE: ${{ steps.python.outputs.result }}
         run: |
           set -uo pipefail
-          zizmor --no-online-audits --format json .github/workflows > "$RESULT_FILE"
+          "$RUNNER_TEMP/zizmor-venv/bin/zizmor" --no-online-audits --format json .github/workflows > "$RESULT_FILE"
 
       - name: Record scan outcome
         timeout-minutes: 1
@@ -262,3 +295,12 @@ jobs:
           path: ${{ steps.python.outputs.result }}
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Save scanner downloads
+        if: success() && steps.seed.outcome == 'success' && steps.seed.outputs.cache_mode == 'fallback' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.install.outcome == 'success' && steps.scan.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''
+        continue-on-error: true
+        timeout-minutes: 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/zizmor-pip-cache
+          key: ${{ steps.cache.outputs.cache-primary-key }}
