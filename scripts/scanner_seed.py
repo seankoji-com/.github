@@ -5,6 +5,8 @@ Resolve all workflow pins into WHEELHOUSE first (including pip); build verifies
 closure offline with pip's resolver. Publish OUTPUT at seed_path() only after
 root ownership and 0555 directories/0444 files are applied by the image builder.
 Consume with: scanner_seed.py install TOOL JOB_VENV. Pins come from PIN_* env.
+Probe with the fresh job venv Python: scanner_seed.py probe TOOL. This reads
+only seed metadata/bytes and prints cache_mode=offline or cache_mode=fallback.
 The reusable workflow embeds these exact bytes, so callers need no hub checkout.
 """
 
@@ -131,6 +133,46 @@ def unique_object(pairs):
     return result
 
 
+def verify_closure(seed, wanted, records):
+    # Use ensurepip's trusted parser, never import anything from seed wheels.
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.tags import sys_tags
+    from pip._vendor.packaging.utils import parse_wheel_filename
+    from pip._vendor.packaging.version import Version
+
+    packages = {r["name"]: r for r in records}
+    dependencies = {}
+    supported = set(sys_tags())
+    for record in records:
+        name, version, _, tags = parse_wheel_filename(record["file"])
+        if canonical(name) != record["name"] or str(version) != record["version"] or not tags & supported:
+            raise ValueError("Wheel filename/ABI does not match seed")
+        with zipfile.ZipFile(seed / "wheels" / record["file"]) as wheel:
+            metadata = next(n for n in wheel.namelist() if n.endswith(".dist-info/METADATA"))
+            meta = email.message_from_bytes(wheel.read(metadata))
+        if meta["Requires-Python"]:
+            from pip._vendor.packaging.specifiers import SpecifierSet
+            if not SpecifierSet(meta["Requires-Python"]).contains(platform.python_version()):
+                raise ValueError("Wheel requires a different Python version")
+        dependencies[record["name"]] = [Requirement(d) for d in meta.get_all("Requires-Dist", [])]
+    pending = [(name, "") for name in roots(wanted)]
+    seen = set()
+    while pending:
+        name, extra = pending.pop()
+        if (name, extra) in seen:
+            continue
+        seen.add((name, extra))
+        for dep in dependencies[name]:
+            if dep.marker and not dep.marker.evaluate({"extra": extra}):
+                continue
+            target = canonical(dep.name)
+            if target not in packages or not dep.specifier.contains(Version(packages[target]["version"]), prereleases=True):
+                raise ValueError("Seed has an incomplete or incompatible dependency closure")
+            pending.extend((target, e) for e in ("", *dep.extras))
+    if {name for name, _ in seen} != set(packages):
+        raise ValueError("Seed contains wheels outside its dependency closure")
+
+
 def verify(seed, wanted):
     if not os.path.lexists(seed):
         return None
@@ -175,7 +217,14 @@ def verify(seed, wanted):
         raise ValueError("Missing or incorrect pinned wheel")
     if (seed / "requirements.txt").read_text() != requirements(records):
         raise ValueError("Requirements do not match complete wheel manifest")
+    verify_closure(seed, wanted, records)
     return records
+
+
+def probe(tool):
+    wanted = identity(tool)
+    records = verify(seed_path(wanted), wanted)
+    print("cache_mode=" + ("fallback" if records is None else "offline"))
 
 
 def install(tool, venv):
@@ -227,12 +276,16 @@ def install(tool, venv):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("build", "install"))
+    parser.add_argument("mode", choices=("build", "install", "probe"))
     parser.add_argument("tool", choices=("semgrep", "zizmor"))
-    parser.add_argument("path", type=Path)
+    parser.add_argument("path", nargs="?", type=Path)
     parser.add_argument("output", nargs="?", type=Path)
     args = parser.parse_args()
-    if args.mode == "build":
+    if args.mode == "probe":
+        probe(args.tool)
+    elif args.path is None:
+        parser.error("build/install requires PATH")
+    elif args.mode == "build":
         if args.output is None:
             parser.error("build requires OUTPUT")
         build(args.tool, args.path, args.output)

@@ -115,7 +115,7 @@ class ScannerInstallerTests(unittest.TestCase):
             # Existing scanner advisory policy is preserved; required gates are separate.
             self.assertTrue(scan["continue-on-error"])
             for step in steps:
-                if step.get("id") in {"python", "install", "scan", "cache"} or "actions/cache/save@" in step.get("uses", ""):
+                if step.get("id") in {"python", "seed", "install", "scan", "cache"} or "actions/cache/save@" in step.get("uses", ""):
                     self.assertGreater(step["timeout-minutes"], 0)
                     self.assertLess(step["timeout-minutes"], job["timeout-minutes"])
 
@@ -130,7 +130,7 @@ class ScannerInstallerTests(unittest.TestCase):
             self.assertEqual(install["env"]["PIP_CACHE_DIR"], cache["with"]["path"])
             self.assertEqual(save["with"]["path"], cache["with"]["path"])
             self.assertEqual(save["with"]["key"], "${{ steps.cache.outputs.cache-primary-key }}")
-            self.assertEqual(save["if"], "success() && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.install.outcome == 'success' && steps.scan.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''")
+            self.assertEqual(save["if"], "success() && steps.seed.outcome == 'success' && steps.seed.outputs.cache_mode == 'fallback' && github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && steps.install.outcome == 'success' && steps.scan.outcome == 'success' && steps.cache.outputs.cache-hit != 'true' && steps.cache.outputs.cache-primary-key != ''")
             scan = next(s for s in job["steps"] if s.get("id") == "scan")
             self.assertGreater(job["steps"].index(save), job["steps"].index(scan))
             self.assertEqual(cache["with"]["path"], "${{ runner.temp }}/" + tool + "-pip-cache")

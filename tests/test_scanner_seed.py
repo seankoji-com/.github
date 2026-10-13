@@ -4,6 +4,7 @@ import base64
 import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
+from contextlib import redirect_stdout
 
 import yaml
 
@@ -26,6 +28,13 @@ seed = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(seed)
 WORKFLOW = ROOT / ".github/workflows/reusable-static-analysis.yml"
 PINS = yaml.safe_load(WORKFLOW.read_text())["env"]
+
+
+def condition(expression, values):
+    expression = expression.replace("&&", " and ")
+    for name in sorted(values, key=len, reverse=True):
+        expression = expression.replace(name, repr(values[name]))
+    return eval(expression, {"__builtins__": {}, "format": lambda s, v: s.format(v)})
 
 
 def wheel(directory, name, version, *, dependencies=(), scanner=False, wrong_version=False, pip_source=None):
@@ -171,12 +180,167 @@ class SeedTests(unittest.TestCase):
                 self.assertEqual([c[0] for c in calls], ["uninstall", "install", "check"])
                 self.remove_fixture(original)
 
+    def test_probe_is_read_only_and_only_publishes_verified_modes(self):
+        for tool in ("semgrep", "zizmor"):
+            path, trust = self.fixture(tool)
+            before = {p.relative_to(path): (p.read_bytes(), p.stat().st_mtime_ns)
+                      for p in path.rglob("*") if p.is_file()}
+            with patch.object(seed, "seed_path", return_value=path), \
+                 patch.object(seed, "immutable", side_effect=trust), \
+                 patch.object(seed.subprocess, "run") as run, \
+                 patch.object(seed.subprocess, "check_output") as scanner, \
+                 redirect_stdout(io.StringIO()) as output:
+                seed.probe(tool)
+            self.assertEqual(output.getvalue(), "cache_mode=offline\n")
+            run.assert_not_called()
+            scanner.assert_not_called()
+            self.assertEqual(before, {p.relative_to(path): (p.read_bytes(), p.stat().st_mtime_ns)
+                                      for p in path.rglob("*") if p.is_file()})
+            self.remove_fixture(path)
+        with patch.object(seed, "seed_path", return_value=self.root / "absent"), \
+             redirect_stdout(io.StringIO()) as output:
+            seed.probe("zizmor")
+        self.assertEqual(output.getvalue(), "cache_mode=fallback\n")
+
+    def test_literal_workflow_offline_fallback_and_corrupt_paths(self):
+        jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
+        for tool, job in jobs.items():
+            steps = job["steps"]
+            probe = next(s for s in steps if s.get("id") == "seed")
+            cache = next(s for s in steps if s.get("id") == "cache")
+            install = next(s for s in steps if s.get("id") == "install")
+            scan = next(s for s in steps if s.get("id") == "scan")
+            save = next(s for s in steps if "actions/cache/save@" in s.get("uses", ""))
+            summary = next(s for s in steps if s["name"] == "Record scan outcome")
+            self.assertLess(steps.index(probe), steps.index(cache))
+            self.assertLess(steps.index(cache), steps.index(install))
+            self.assertEqual(probe["if"], "steps.python.outcome == 'success'")
+            self.assertEqual(cache["if"], "steps.seed.outcome == 'success' && steps.seed.outputs.cache_mode == 'fallback'")
+            self.assertEqual(install["if"], "steps.python.outcome == 'success' && steps.seed.outcome == 'success'")
+            for case in ("offline", "missing", "abi-mismatch", "pin-mismatch", "corrupt"):
+                with self.subTest(tool=tool, case=case):
+                    path, trust = self.fixture(tool)
+                    if case == "missing":
+                        self.remove_fixture(path)
+                    elif case == "abi-mismatch":
+                        self.rewrite(path, lambda m: m["identity"].update(abi="mismatch"))
+                    elif case == "pin-mismatch":
+                        self.rewrite(path, lambda m: m["identity"]["pins"].update(PIN_PIP="0.0"))
+                    elif case == "corrupt":
+                        self.rewrite(path, lambda m: m.update(wheels=[]))
+                    job_venv = self.root / (tool + "-venv")
+                    subprocess.run([sys.executable, "-I", "-m", "venv", "--clear", str(job_venv)],
+                                   check=True, timeout=30, capture_output=True)
+                    shim = job_venv / "bin/python3"
+                    shim.unlink()
+                    # Execute the workflow's literal heredoc/checksum and helper.
+                    # Model only the root-owned Linux image boundary. Trap any
+                    # fallback download before it can reach the network.
+                    shim.write_text(f"#!{sys.executable} -B\n" + '''import builtins, json, os, subprocess, sys
+from pathlib import Path
+from unittest.mock import patch
+original_exec = builtins.exec
+def fixture_exec(code, namespace=None, *args, **kwargs):
+    if getattr(code, "co_filename", None) != "scanner_seed.py":
+        return original_exec(code, namespace, *args, **kwargs)
+    namespace["__name__"] = "fixture_module"
+    original_exec(code, namespace)
+    namespace["seed_path"] = lambda wanted: Path(os.environ["FIXTURE_SEED"])
+    original_stat = namespace["immutable"]
+    def trust(path, *, directory=False, ancestor=False):
+        if ancestor:
+            return
+        info = path.lstat()
+        info = type("RootStat", (), {"st_uid": 0, "st_mode": info.st_mode})()
+        with patch.object(Path, "lstat", return_value=info):
+            original_stat(path, directory=directory)
+    namespace["immutable"] = trust
+    namespace["platform"].system = lambda: "Linux"
+    original_pip = namespace["pip_command"]
+    def pip(python, *args):
+        with open(os.environ["FIXTURE_PIP_LOG"], "a") as log:
+            log.write(json.dumps(args) + "\\n")
+        if args[0] == "install" and "--no-index" not in args:
+            raise subprocess.CalledProcessError(17, ["fixture-download-trap"])
+        return original_pip(python, *args)
+    namespace["pip_command"] = pip
+    namespace["main"]()
+builtins.exec = fixture_exec
+sys.argv = ["-", *sys.argv[sys.argv.index("-") + 1:]]
+try:
+    original_exec(compile(sys.stdin.read(), "workflow-heredoc", "exec"), {"__name__": "__main__"})
+except subprocess.CalledProcessError as error:
+    sys.exit(error.returncode)
+''')
+                    shim.chmod(0o755)
+                    output, github_path, pip_log = (self.root / name for name in ("output", "github-path", "pip-calls"))
+                    for p in (output, github_path, pip_log):
+                        p.unlink(missing_ok=True)
+                    env = {**os.environ, **PINS, "RUNNER_TEMP": str(self.root),
+                           "GITHUB_OUTPUT": str(output), "GITHUB_PATH": str(github_path),
+                           "FIXTURE_SEED": str(path), "FIXTURE_PIP_LOG": str(pip_log)}
+                    result = subprocess.run(["/bin/bash", "-c", probe["run"]], env=env,
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertFalse(pip_log.exists(), "Probe must never run pip")
+                    self.assertFalse(github_path.exists())
+                    mode = "offline" if case == "offline" else "fallback"
+                    if case == "corrupt":
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertFalse(output.exists(), "Corrupt seed must not publish a mode")
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(output.read_text(), f"cache_mode={mode}\n")
+                    values = {"steps.python.outcome": "success",
+                              "steps.seed.outcome": "failure" if case == "corrupt" else "success",
+                              "steps.seed.outputs.cache_mode": "" if case == "corrupt" else mode}
+                    self.assertEqual(condition(cache["if"], values), case in {"missing", "abi-mismatch", "pin-mismatch"})
+                    if condition(install["if"], values):
+                        result = subprocess.run(["/bin/bash", "-c", install["run"]], env=env,
+                                                capture_output=True, text=True, timeout=30)
+                        self.assertEqual(result.returncode, 0 if case == "offline" else 17, result.stderr)
+                        values["steps.install.outcome"] = "success" if result.returncode == 0 else "failure"
+                    else:
+                        values["steps.install.outcome"] = "skipped"
+                    self.assertEqual(condition(scan["if"], values), case == "offline")
+                    self.assertEqual(github_path.exists(), case == "offline")
+                    if case == "offline":
+                        calls = [json.loads(line) for line in pip_log.read_text().splitlines()]
+                        self.assertEqual([c[0] for c in calls], ["uninstall", "install", "check"])
+                        self.assertIn("--no-index", calls[1])
+                        self.assertIn("--require-hashes", calls[1])
+                    elif case != "corrupt":
+                        call = json.loads(pip_log.read_text())
+                        self.assertIn("--timeout", call)
+                        self.assertIn("--retries", call)
+                    else:
+                        self.assertFalse(pip_log.exists())
+                        report = self.root / "summary"
+                        report.unlink(missing_ok=True)
+                        result = subprocess.run(["/bin/bash", "-c", summary["run"]],
+                            env={**env, "INSTALL_OUTCOME": "skipped", "SCAN_OUTCOME": "skipped",
+                                 "RESULT_FILE": "", "GITHUB_STEP_SUMMARY": str(report)},
+                            capture_output=True, text=True, timeout=5)
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn("NO-OUTPUT", report.read_text())
+                        self.assertNotIn("SCANNED:", report.read_text())
+                    # Even hypothetical success cannot save downloads on offline.
+                    values.update({"success()": True, "github.event_name": "push", "github.ref": "refs/heads/main",
+                                   "github.event.repository.default_branch": "main", "steps.scan.outcome": "success",
+                                   "steps.cache.outputs.cache-hit": "false", "steps.cache.outputs.cache-primary-key": "key"})
+                    self.assertFalse(condition(save["if"], values))
+                    if path.exists():
+                        self.remove_fixture(path)
+
     def test_pin_abi_platform_arch_tool_mismatch_retains_bounded_fallback(self):
         for field in ("pins", "abi", "os", "arch", "tool"):
             with self.subTest(field=field):
                 path, trust = self.fixture()
                 self.rewrite(path, lambda m: m["identity"].update(
                     {field: {**PINS, "PIN_PIP": "0.0"} if field == "pins" else "mismatch"}))
+                with patch.object(seed, "seed_path", return_value=path), \
+                     patch.object(seed, "immutable", side_effect=trust), redirect_stdout(io.StringIO()) as output:
+                    seed.probe("zizmor")
+                self.assertEqual(output.getvalue(), "cache_mode=fallback\n")
                 calls = []
                 with patch.object(seed, "seed_path", return_value=path), patch.object(seed, "immutable", side_effect=trust), \
                      patch.object(seed, "pip_command", side_effect=lambda py, *a: calls.append(a)), \
@@ -241,6 +405,10 @@ class SeedTests(unittest.TestCase):
                      patch.object(seed, "seed_path", return_value=path), patch.object(seed, "immutable", side_effect=trust):
                     with self.assertRaises((ValueError, FileNotFoundError)):
                         seed.install("zizmor", self.root / "venv")
+                    with redirect_stdout(io.StringIO()) as output:
+                        with self.assertRaises((ValueError, FileNotFoundError)):
+                            seed.probe("zizmor")
+                    self.assertEqual(output.getvalue(), "")
                 run.assert_not_called()
                 self.remove_fixture(path)
 
@@ -256,7 +424,14 @@ class SeedTests(unittest.TestCase):
         req.chmod(0o644)
         req.write_text(seed.requirements([r for r in manifest["wheels"] if r != removed]))
         req.chmod(0o444)
-        with self.assertRaises(subprocess.CalledProcessError):
+        with patch.object(seed.subprocess, "run") as run, \
+             patch.object(seed, "seed_path", return_value=path), \
+             patch.object(seed, "immutable", side_effect=trust), redirect_stdout(io.StringIO()) as output:
+            with self.assertRaisesRegex(ValueError, "dependency closure"):
+                seed.probe("zizmor")
+        run.assert_not_called()
+        self.assertEqual(output.getvalue(), "")
+        with self.assertRaisesRegex(ValueError, "dependency closure"):
             self.consume(path, trust)
 
     def test_build_rejects_empty_extra_duplicate_incomplete_and_url_wheels(self):
@@ -278,6 +453,41 @@ class SeedTests(unittest.TestCase):
                 with self.assertRaises((ValueError, subprocess.CalledProcessError)), \
                      patch.object(seed.sys, "executable", str(self.python)):
                     seed.build("zizmor", house, self.root / (case + "-out"))
+
+    def test_probe_rejects_hashed_but_incompatible_or_unresolved_wheels(self):
+        for case in ("version", "extra", "wheel-abi", "unrelated"):
+            with self.subTest(case=case):
+                path, trust = self.fixture()
+                wheels = path / "wheels"
+                wheels.chmod(0o755)
+                if case in {"version", "extra"}:
+                    scanner = next(wheels.glob("zizmor-*.whl"))
+                    scanner.unlink()
+                    wheel(wheels, "zizmor", PINS["PIN_ZIZMOR"], scanner=True,
+                          dependencies=("fixture-dep==3.0" if case == "version" else "fixture-dep[enabled]==2.0",))
+                    if case == "extra":
+                        next(wheels.glob("fixture_dep-*.whl")).unlink()
+                        wheel(wheels, "fixture-dep", "2.0", dependencies=('missing==1.0; extra == "enabled"',))
+                elif case == "wheel-abi":
+                    scanner = next(wheels.glob("zizmor-*.whl"))
+                    scanner.rename(wheels / scanner.name.replace("py3-none-any", "cp999-cp999-unknown"))
+                else:
+                    wheel(wheels, "unrelated", "1.0")
+                records = sorted((seed.wheel_record(p) for p in wheels.iterdir()), key=lambda r: r["name"])
+                self.rewrite(path, lambda m: m.update(wheels=records))
+                req = path / "requirements.txt"
+                req.chmod(0o644)
+                req.write_text(seed.requirements(records))
+                for p in [wheels, *wheels.iterdir(), req]:
+                    p.chmod(0o555 if p.is_dir() else 0o444)
+                with patch.object(seed, "seed_path", return_value=path), \
+                     patch.object(seed, "immutable", side_effect=trust), \
+                     patch.object(seed.subprocess, "run") as run, redirect_stdout(io.StringIO()) as output:
+                    with self.assertRaises(ValueError):
+                        seed.probe("zizmor")
+                run.assert_not_called()
+                self.assertEqual(output.getvalue(), "")
+                self.remove_fixture(path)
 
     def test_stat_boundary_rejects_nonroot_writable_and_symlink_files_and_parents(self):
         for uid, mode, directory, ancestor in (
@@ -375,6 +585,7 @@ class SourceContractTests(unittest.TestCase):
                           "github.ref": "refs/heads/" + branch,
                           "github.event.repository.default_branch": default,
                           "steps.install.outcome": installed,
+                          "steps.seed.outcome": "success", "steps.seed.outputs.cache_mode": "fallback",
                           "steps.scan.outcome": "success",
                           "steps.cache.outputs.cache-hit": cache_hit,
                           "steps.cache.outputs.cache-primary-key": cache_key}
@@ -383,11 +594,24 @@ class SourceContractTests(unittest.TestCase):
                     expr = expr.replace(name, repr(values[name]))
                 # Only this trusted workflow's limited condition grammar executes.
                 self.assertEqual(eval(expr, {"__builtins__": {}, "format": lambda s, v: s.format(v)}), expected)
-            for outcome in ("failure", "cancelled", "skipped", ""):
+            for field in ("steps.scan.outcome", "steps.seed.outcome", "steps.install.outcome"):
+                for outcome in ("failure", "cancelled", "skipped", ""):
+                    expr = save["if"].replace("&&", " and ")
+                    values.update({"success()": True, "github.event_name": "push",
+                                   "github.ref": "refs/heads/main", "github.event.repository.default_branch": "main",
+                                   "steps.install.outcome": "success", "steps.scan.outcome": "success",
+                                   "steps.seed.outcome": "success", "steps.seed.outputs.cache_mode": "fallback",
+                                   "steps.cache.outputs.cache-hit": "false", "steps.cache.outputs.cache-primary-key": "key"})
+                    values[field] = outcome
+                    for name in sorted(values, key=len, reverse=True):
+                        expr = expr.replace(name, repr(values[name]))
+                    self.assertFalse(eval(expr, {"__builtins__": {}, "format": lambda s, v: s.format(v)}))
+            for mode in ("offline", "", "unknown"):
                 expr = save["if"].replace("&&", " and ")
                 values.update({"success()": True, "github.event_name": "push",
                                "github.ref": "refs/heads/main", "github.event.repository.default_branch": "main",
-                               "steps.install.outcome": "success", "steps.scan.outcome": outcome,
+                               "steps.install.outcome": "success", "steps.scan.outcome": "success",
+                               "steps.seed.outcome": "success", "steps.seed.outputs.cache_mode": mode,
                                "steps.cache.outputs.cache-hit": "false", "steps.cache.outputs.cache-primary-key": "key"})
                 for name in sorted(values, key=len, reverse=True):
                     expr = expr.replace(name, repr(values[name]))
@@ -396,14 +620,14 @@ class SourceContractTests(unittest.TestCase):
     def test_embedded_helper_is_exact_checksum_verified_source_for_every_job(self):
         jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
         for job in jobs.values():
-            step = next(s for s in job["steps"] if s.get("id") == "install")
-            encoded = re.search(r'base64.b64decode\("([A-Za-z0-9+/=]+)"\)', step["run"]).group(1)
-            source = gzip.decompress(base64.b64decode(encoded))
-            self.assertEqual(source, SOURCE.read_bytes())
-            self.assertIn(hashlib.sha256(source).hexdigest(), step["run"])
-            self.assertIn("python3 -I", step["run"])
-            self.assertNotIn("raw.githubusercontent", step["run"])
-            self.assertNotIn("scripts/scanner_seed.py", step["run"])
+            for step in (s for s in job["steps"] if s.get("id") in {"seed", "install"}):
+                encoded = re.search(r'base64.b64decode\("([A-Za-z0-9+/=]+)"\)', step["run"]).group(1)
+                source = gzip.decompress(base64.b64decode(encoded))
+                self.assertEqual(source, SOURCE.read_bytes())
+                self.assertIn(hashlib.sha256(source).hexdigest(), step["run"])
+                self.assertIn('-venv/bin/python3" -I', step["run"])
+                self.assertNotIn("raw.githubusercontent", step["run"])
+                self.assertNotIn("scripts/scanner_seed.py", step["run"])
 
     def test_complete_scopes_and_current_pins_advisory_and_hosted_isolation(self):
         document = yaml.safe_load(WORKFLOW.read_text())
