@@ -50,6 +50,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import gatekeeper_workflows as workflows
+
 API = "https://api.github.com"
 
 # The check-run name, verbatim. The org ruleset matches this string exactly;
@@ -69,7 +73,7 @@ PERSONA_STATE_RE = re.compile(
     re.MULTILINE)
 DISPATCH_ALERT_MINUTES = 10
 REVIEW_ALERT_MINUTES = 120
-GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
+GATE_WORKFLOW_PATH = workflows.GATE_WORKFLOW_PATH
 EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->" 
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
@@ -252,149 +256,23 @@ def _batch(payload: object, key: str) -> list[dict]:
     return batch
 
 
-class WorkflowInventoryDrift(ValueError):
-    """A paginated run inventory changed or was incomplete during the read."""
+WorkflowInventoryDrift = workflows.WorkflowInventoryDrift
 
 
 def collect_workflow_checks(repo: str, sha: str, token: str,
                             inventory: dict | None = None) -> tuple[list[dict], set[int]]:
-    for attempt in range(3):
-        try:
-            return _collect_workflow_checks(repo, sha, token, inventory)
-        except WorkflowInventoryDrift:
-            if attempt == 2:
-                raise
-            time.sleep(1)
-
-
-def _collect_workflow_checks(repo: str, sha: str, token: str,
-                             inventory: dict | None = None) -> tuple[list[dict], set[int]]:
-    """Include registered workflows before they create their first check run."""
-    latest = {}
-    known_suites = set()
-    seen_runs = set()
-    expected_count = None
-    page = 1
-    while True:
-        payload = _get(f"/repos/{repo}/actions/runs?head_sha={urllib.parse.quote(sha, safe='')}&per_page=100&page={page}", token)
-        batch = _batch(payload, "workflow_runs")
-        count = payload.get("total_count")
-        if not isinstance(count, int) or count < 0 or count > 1000:
-            raise ValueError("invalid or truncated workflow run inventory")
-        if expected_count is not None and count != expected_count:
-            raise WorkflowInventoryDrift("workflow run inventory changed during pagination; retry")
-        expected_count = count
-        for run in batch:
-            if not run.get("id"):
-                raise ValueError("missing workflow run identity")
-            if run["id"] in seen_runs:
-                raise WorkflowInventoryDrift("duplicate workflow run identity; retry")
-            seen_runs.add(run["id"])
-            if not run.get("head_sha"):
-                raise ValueError("workflow run missing head SHA")
-            if run["head_sha"] != sha:
-                continue
-            path = run.get("path")
-            if not isinstance(path, str) or not path or not run.get("workflow_id") or not run.get("id"):
-                raise ValueError("workflow run missing identity")
-            if (str(run["id"]) == os.environ.get("GITHUB_RUN_ID")
-                    or path.split("@", 1)[0] == GATE_WORKFLOW_PATH):
-                continue
-            if isinstance(run.get("check_suite_id"), int):
-                known_suites.add(run["check_suite_id"])
-            key = (run["workflow_id"], run.get("event"), run.get("head_branch"))
-            order = (run["id"], run.get("run_attempt") or 1)
-            if key not in latest or order > latest[key][0]:
-                latest[key] = (order, run)
-        if len(batch) < 100:
-            if len(seen_runs) != expected_count:
-                raise WorkflowInventoryDrift("incomplete workflow run inventory; retry")
-            break
-        page += 1
-    selected_suites = {run.get("check_suite_id") for _, run in latest.values()}
-    if inventory is not None:
-        inventory[sha] = [run for _, run in latest.values()]
-    def label(value):
-        # Inline code keeps fork-controlled paths/branches from becoming links.
-        return "`" + " ".join(str(value).split()).replace("`", "'")[:100] + "`"
-
-    checks = [{"id": run["id"],
-             "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); "
-                      f"[run {run['id']}](https://github.com/{repo}/actions/runs/{run['id']}). "
-                      "Resolve pending execution/approval or rerun unsuccessful runs"),
-             "status": run.get("status"), "conclusion": run.get("conclusion")}
-            for key, (_, run) in latest.items()]
-    return checks, known_suites - selected_suites
+    """Inventory workflow runs through this module's injected HTTP seams."""
+    return workflows.collect_workflow_checks(_get, _batch, repo, sha, token, inventory)
 
 
 def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | None = None,
                      inventory: dict | None = None) -> tuple[list, dict, list]:
-    """Fetch the three payloads for a commit SHA or URL-encoded branch ref."""
-    runs: list = []
-    page = 1
-    while True:
-        payload = _get(
-            f"/repos/{repo}/commits/{ref}/check-runs"
-            f"?filter=latest&per_page=100&page={page}",
-            token,
-        )
-        batch = _batch(payload, "check_runs")
-        runs.extend(batch)
-        if len(batch) < 100:
-            break
-        page += 1
-
-    statuses = None
-    page = 1
-    while True:
-        payload = _get(f"/repos/{repo}/commits/{ref}/status?per_page=100&page={page}", token)
-        batch = _batch(payload, "statuses")
-        if not isinstance(payload.get("total_count"), int) or payload["total_count"] < 0:
-            raise ValueError("invalid status count")
-        if statuses is None:
-            statuses = dict(payload, statuses=[])
-        statuses["statuses"].extend(batch)
-        if len(batch) < 100:
-            break
-        page += 1
-
-    suites: list = []
-    page = 1
-    while True:
-        payload = _get(
-            f"/repos/{repo}/commits/{ref}/check-suites?per_page=100&page={page}", token
-        )
-        batch = _batch(payload, "check_suites")
-        suites.extend(batch)
-        if len(batch) < 100:
-            break
-        page += 1
-
-    workflow_checks, superseded_suites = collect_workflow_checks(repo, workflow_sha or ref, token, inventory)
-    # A new workflow run on the same SHA can replace a canceled older suite.
-    # Keep suites from distinct workflows, even when their job names match.
-    runs = [run for run in runs if (run.get("check_suite") or {}).get("id") not in superseded_suites]
-    suites = [suite for suite in suites if suite.get("id") not in superseded_suites]
-    runs.extend(workflow_checks)
-    return runs, statuses, suites
+    return workflows.collect_for_ref(_get, _batch, repo, ref, token,
+                                     workflow_sha=workflow_sha, inventory=inventory)
 
 
 def _open_pr_ref(repo: str, sha: str, token: str) -> str | None:
-    """Return the URL-encoded branch ref for an open PR at `sha`, if any."""
-    page = 1
-    while True:
-        prs = _get(f"/repos/{repo}/pulls?state=open&per_page=100&page={page}", token)
-        if not isinstance(prs, list):
-            raise ValueError("invalid open PR response")
-        for pr in prs:
-            head = pr.get("head") if isinstance(pr, dict) else None
-            if not isinstance(head, dict):
-                raise ValueError("invalid open PR head")
-            if head.get("sha") == sha and isinstance(head.get("ref"), str):
-                return urllib.parse.quote(head["ref"], safe="")
-        if len(prs) < 100:
-            return None
-        page += 1
+    return workflows.open_pr_ref(_get, repo, sha, token)
 
 
 def collect(repo: str, sha: str, token: str, *, inventory: dict | None = None) -> tuple[list, dict, list]:
@@ -415,145 +293,14 @@ def collect(repo: str, sha: str, token: str, *, inventory: dict | None = None) -
     return _collect_for_ref(repo, ref, token, workflow_sha=sha, inventory=inventory)
 
 
-def parse_required_workflows(value: str) -> list[dict]:
-    """Caller-owned JSON, never workflow discovery or shell source.
-
-    Each entry is {"path": ".github/workflows/ci.yml", "event": "pull_request",
-    "ref": "head"}. ref binds Actions REST head_sha, not a job's checkout:
-    PR runs commonly report the source head even when checkout tests the merge.
-    Use merge only for runs actually indexed by the current merge SHA.
-    """
-    if len(value) > 16384:
-        raise ValueError("required_workflows exceeds input limit")
-    entries = json.loads(value or "[]")
-    if not isinstance(entries, list) or len(entries) > 50:
-        raise ValueError("required_workflows must be a JSON array of at most 50 entries")
-    seen = set()
-    for entry in entries:
-        if (not isinstance(entry, dict) or set(entry) != {"path", "event", "ref"}
-                or not all(isinstance(v, str) for v in entry.values())
-                or not re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", entry["path"])
-                or entry["path"] == GATE_WORKFLOW_PATH
-                or entry["event"] not in {"pull_request", "push", "workflow_dispatch"}
-                or entry["ref"] not in {"head", "merge"}):
-            raise ValueError("invalid required_workflows entry: expected path, event, and head/merge ref")
-        key = (entry["path"], entry["event"], entry["ref"])
-        if key in seen:
-            raise ValueError("duplicate required_workflows entry")
-        seen.add(key)
-    return entries
-
-
-def _required_run_matches(run: dict, entry: dict, pr: dict, sha: str, prs: list[dict]) -> bool:
-    """Bind evidence to this PR/ref, including fork runs with no PR array."""
-    head = pr["head"]
-    if (run.get("head_sha") != sha or run.get("event") != entry["event"]
-            or run.get("head_branch") != head.get("ref")):
-        return False
-    repository = run.get("head_repository") or {}
-    if not head.get("repo", {}).get("id") or repository.get("id") != head["repo"]["id"]:
-        return False
-    linked = run.get("pull_requests")
-    if not isinstance(linked, list):
-        return False
-    if linked:
-        return any(p.get("number") == pr.get("number")
-                   and (p.get("head") or {}).get("sha") == head["sha"] for p in linked)
-    # Empty fork associations must identify only one current PR. A shared
-    # branch/head targeting different bases cannot borrow another PR's run.
-    return sum(p["head"].get("ref") == head.get("ref")
-               and (p["head"].get("repo") or {}).get("id") == repository["id"]
-               and (p["head"]["sha"] if entry["ref"] == "head" else p.get("merge_commit_sha")) == sha
-               for p in prs) == 1
-
-
-def _attempt_jobs(repo: str, run: dict, token: str) -> list[dict]:
-    """Read only this attempt, with complete pagination and identity checks."""
-    jobs, seen, expected, page = [], set(), None, 1
-    while True:
-        payload = _get(f"/repos/{repo}/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs"
-                       f"?per_page=100&page={page}", token)
-        batch = _batch(payload, "jobs")
-        count = payload.get("total_count")
-        if (type(count) is not int or count < 0
-                or (expected is not None and count != expected)):
-            raise ValueError("invalid or changed required workflow jobs inventory")
-        expected = count
-        for job in batch:
-            if (not job.get("id") or job["id"] in seen or job.get("run_id") != run["id"]
-                    or job.get("run_attempt") != run["run_attempt"]
-                    or job.get("head_sha") != run["head_sha"]):
-                raise ValueError("required workflow job identity/ref/attempt mismatch")
-            seen.add(job["id"])
-            jobs.append(job)
-        if len(batch) < 100:
-            if len(jobs) != expected:
-                raise ValueError("incomplete required workflow jobs inventory")
-            return jobs
-        page += 1
+parse_required_workflows = workflows.parse_required_workflows
 
 
 def required_workflow_checks(repo: str, entries: list[dict], prs: list[dict], inventory: dict,
-                              token: str, metadata: dict) -> list[dict]:
-    """Require every declared workflow on every PR sharing the published head."""
-    checks, verified = [], {}
-    for entry in entries:
-        path = entry["path"]
-        if path not in metadata:
-            metadata[path] = _get(f"/repos/{repo}/actions/workflows/{urllib.parse.quote(path.rsplit('/', 1)[1], safe='')}", token)
-        workflow = metadata[path]
-        if (type(workflow.get("id")) is not int or workflow["id"] <= 0
-                or workflow.get("path") != path or workflow.get("state") != "active"):
-            raise ValueError("required workflow metadata does not identify an active matching path")
-        for pr in prs or [{}]:
-            name = f"Required workflow `{path}` ({entry['event']}, {entry['ref']}, PR {pr.get('number', '?')})"
-            sha = ((pr.get("head") or {}).get("sha") if entry["ref"] == "head"
-                   else pr.get("merge_commit_sha"))
-            candidates = [r for r in inventory.get(sha, [])
-                          if r.get("workflow_id") == workflow["id"]
-                          and r.get("path", "").split("@", 1)[0] == path
-                          and _required_run_matches(r, entry, pr, sha, prs)] if sha else []
-            if not candidates:
-                checks.append({"name": name + ": missing current-ref run", "status": "queued"})
-                continue
-            selected = max(candidates, key=lambda r: (r["id"], r.get("run_attempt") or 0))
-            key = (selected["id"], selected.get("run_attempt"))
-            if key not in verified:
-                current = _get(f"/repos/{repo}/actions/runs/{selected['id']}", token)
-                if (any(current.get(k) != selected.get(k) for k in
-                        ("id", "workflow_id", "path", "head_sha", "event", "head_branch"))
-                        or type(current.get("run_attempt")) is not int or current["run_attempt"] < 1
-                        or current["run_attempt"] < (selected.get("run_attempt") or 1)):
-                    raise ValueError("required workflow run identity/ref/attempt changed")
-                jobs = _attempt_jobs(repo, current, token) if current.get("status") == "completed" and current.get("conclusion") == "success" else []
-                # A rerun begun while jobs were read must not inherit success.
-                if jobs:
-                    after = _get(f"/repos/{repo}/actions/runs/{selected['id']}", token)
-                    if after != current:
-                        raise ValueError("required workflow run changed while reading jobs; retry")
-                verified[key] = current, jobs
-            current, jobs = verified[key]
-            if not _required_run_matches(current, entry, pr, sha, prs):
-                raise ValueError("required workflow PR association changed")
-            status, conclusion = current.get("status"), current.get("conclusion")
-            if status == "completed" and conclusion == "success":
-                if not jobs:
-                    status, conclusion = "queued", None
-                    name += ": empty latest attempt"
-                elif any(j.get("status") != "completed" for j in jobs):
-                    status, conclusion = "queued", None
-                    name += ": latest-attempt jobs pending"
-                elif any(j.get("conclusion") not in {"success", "skipped"} for j in jobs):
-                    conclusion = "failure"
-                    name += ": latest-attempt jobs unsuccessful"
-                elif not any(j.get("conclusion") == "success" for j in jobs):
-                    status, conclusion = "queued", None
-                    name += ": no successful jobs in latest attempt"
-            elif status == "completed" and conclusion != "success":
-                name += f": {conclusion or 'no conclusion'}"
-                conclusion = "failure"
-            checks.append({"name": name, "status": status, "conclusion": conclusion})
-    return checks
+                             token: str, metadata: dict) -> list[dict]:
+    """Verify caller-declared workflows through this module's injected seams."""
+    return workflows.required_workflow_checks(
+        _get, _batch, repo, entries, prs, inventory, token, metadata)
 
 
 def persona_verdict(reviews: list[dict], sha: str) -> tuple[str, str | None]:

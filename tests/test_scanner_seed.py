@@ -105,7 +105,10 @@ class SeedTests(unittest.TestCase):
     def setUp(self):
         self.work = tempfile.TemporaryDirectory(prefix="scanner-consume-")
         self.addCleanup(self.work.cleanup)
-        self.root = Path(self.work.name)
+        # 3.11+ canonicalises a symlinked temp root when it computes the venv
+        # sys.prefix (macOS /var -> /private/var), so keep fixtures off the
+        # unresolved path the production interpreter would report.
+        self.root = Path(self.work.name).resolve()
         self.start_env = patch.dict(os.environ, {**PINS, "PIP_CONFIG_FILE": os.devnull,
                                                "PIP_CACHE_DIR": str(self.root / "pip-cache"),
                                                "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
@@ -160,8 +163,14 @@ class SeedTests(unittest.TestCase):
                 (path / "bin/python").symlink_to(interpreter)
                 (path / "bin/python3").symlink_to("python")
                 (path / f"bin/python3.{sys.version_info.minor}").symlink_to("python")
+        # Native alias topology is version-dependent: a 3.12 venv links
+        # bin/python -> python3.12 (not -> python3), while uv links
+        # bin/python3 -> python and bin/python -> the host interpreter. Both
+        # directions still execute a real venv interpreter below.
+        version = f"python{sys.version_info.major}.{sys.version_info.minor}"
         alias = path / ("bin/python" if layout == "venv" else "bin/python3")
-        self.assertEqual(os.readlink(alias), "python3" if layout == "venv" else "python")
+        expected = {"python3", version} if layout == "venv" else {"python"}
+        self.assertIn(os.readlink(alias), expected, "Unexpected native venv alias topology")
         result = subprocess.run([str(path / "bin/python3"), "-I", "-c",
                                  "import sysconfig; print(sysconfig.get_path('purelib'))"],
                                 check=True, timeout=10, capture_output=True, text=True)
@@ -266,9 +275,11 @@ class SeedTests(unittest.TestCase):
                     interpreters = {name: (job_venv / "bin" / name).resolve()
                                     for name in ("python", "python3")}
                     # Execute the literal workflow with intact venv interpreters.
-                    # sitecustomize loads even under -I and stubs only image
-                    # trust and downloads when the embedded helper executes.
-                    (site / "sitecustomize.py").write_text('''import builtins, json, os, subprocess
+                    # A site-packages .pth import runs even under -I and even
+                    # when the runner's stdlib ships its own sitecustomize; the
+                    # boot module stubs only image trust and downloads when the
+                    # embedded helper executes.
+                    (site / "_scanner_fixture_boot.py").write_text('''import builtins, json, os, subprocess
 from pathlib import Path
 from unittest.mock import patch
 original_exec = builtins.exec
@@ -302,6 +313,7 @@ def fixture_exec(code, namespace=None, *args, **kwargs):
         raise SystemExit(error.returncode)
 builtins.exec = fixture_exec
 ''')
+                    (site / "zz-scanner-fixture-boot.pth").write_text("import _scanner_fixture_boot\n")
                     output, github_path, pip_log = (root / name for name in ("output", "github-path", "pip-calls"))
                     for p in (output, github_path, pip_log):
                         p.unlink(missing_ok=True)
