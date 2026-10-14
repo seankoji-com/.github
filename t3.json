@@ -1,0 +1,15 @@
+{
+  "$schema": "https://t3.codes/schema/t3.json",
+  "scripts": [
+    {
+      "name": "Tests",
+      "command": "python3 -B -m unittest discover -s tests -p 'test_*.py'",
+      "icon": "test"
+    },
+    {
+      "name": "Lint",
+      "command": "PYTHONPYCACHEPREFIX=\"${TMPDIR:-/tmp}/dot-github-pyc\" python3 -m py_compile scripts/*.py",
+      "icon": "lint"
+    }
+  ]
+}
