@@ -4,7 +4,7 @@ Public software by [Sean Carey](https://seankoji.com), a senior engineering lead
 
 New here and short on time? Start with Tanks, then t3-plugins. The full catalogue, with write-ups, is at [seankoji.com/open-source](https://seankoji.com/open-source).
 
-## Start here
+## Featured projects
 
 ### [tanks](https://github.com/seankoji-com/tanks)
 
@@ -32,7 +32,7 @@ A terminal home for coding-agent loops, each in its own Git worktree, built to n
 
 ## Also maintained
 
-Claude Code and OpenCode plugins ([claude-plugins](https://github.com/seankoji-com/claude-plugins), [opencode-session-cycler](https://github.com/seankoji-com/opencode-session-cycler), [opencode-localise-timestamps](https://github.com/seankoji-com/opencode-localise-timestamps), [agy-plugin-codex](https://github.com/seankoji-com/agy-plugin-codex)), a [Homebrew tap](https://github.com/seankoji-com/homebrew-tap) that ships the tools above, and a zsh kit broken into plugins you can take one at a time. Organisation defaults and shared CI live in [.github](https://github.com/seankoji-com/.github).
+Claude Code and OpenCode plugins ([claude-plugins](https://github.com/seankoji-com/claude-plugins), [opencode-session-cycler](https://github.com/seankoji-com/opencode-session-cycler), [opencode-localise-timestamps](https://github.com/seankoji-com/opencode-localise-timestamps), [agy-plugin-codex](https://github.com/seankoji-com/agy-plugin-codex)), a [Homebrew tap](https://github.com/seankoji-com/homebrew-tap) that ships the tools above, and a [zsh kit](https://github.com/orgs/seankoji-com/repositories?q=zsh) broken into plugins you can take one at a time. Organisation defaults and shared CI live in [.github](https://github.com/seankoji-com/.github).
 
 ## How this organisation runs
 
