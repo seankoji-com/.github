@@ -1,29 +1,43 @@
 # seankoji-com
 
-Open-source projects by [Sean Carey](https://github.com/seankoji), focused on
-developer tools, automation, and practical infrastructure.
+Public software by [Sean Carey](https://seankoji.com), a senior engineering leader who still writes code most days. The work here splits into three piles: a live consumer product, tooling for coding agents, and the small utilities that keep a one-person homelab honest. Everything is source-available to read, and most of it is one install command away from running.
+
+New here and short on time? Start with Tanks, then t3-plugins. The full catalogue, with write-ups, is at [seankoji.com/open-source](https://seankoji.com/open-source).
 
 ## Featured projects
 
-### [claude-plugins](https://github.com/seankoji-com/claude-plugins)
+### [tanks](https://github.com/seankoji-com/tanks)
 
-A plugin marketplace for coding-agent workflows, design documents, review, and
-multi-agent orchestration.
+Sydney fuel prices after your discounts, refreshed every 20 minutes from the NSW FuelCheck API, with price-cycle position, 7-Eleven fuel-lock advice and experimental 24-hour and 7-day forecasts. Live at [tanks.seankoji.com](https://tanks.seankoji.com), running on a Raspberry Pi.
 
-### [freshen](https://github.com/seankoji-com/freshen)
+### [t3-plugins](https://github.com/seankoji-com/t3-plugins)
 
-A Go terminal interface for synchronizing and inspecting many Git repositories.
+Six workflows for coding agents in T3 Code. Give an agent a bounded job, then demand test results and an independent review tied to the exact revision before anything merges. Evidence first, summaries second. Docs at [seankoji-com.github.io/t3-plugins](https://seankoji-com.github.io/t3-plugins/).
 
 ### [frugalbar](https://github.com/seankoji-com/frugalbar)
 
-A native macOS menu-bar app for viewing AI subscription and API usage.
+A native macOS menu-bar app that puts AI quotas, spend caps and rate limits beside your clock, checked before a job stalls halfway through. Where a provider publishes no figure, the row says so.
 
-### [homebrew-tap](https://github.com/seankoji-com/homebrew-tap)
+### [freshen](https://github.com/seankoji-com/freshen)
 
-The Homebrew tap for seankoji-com command-line tools and applications.
+One terminal screen for a folder of Git repositories: what is behind, what is dirty, what is waiting on CI. Syncs in parallel, only when you ask.
 
-## Contributing
+### [recovery-lab](https://github.com/seankoji-com/recovery-lab)
 
-Organization-wide contribution, support, conduct, and security guidance lives
-in this public `.github` repository. Individual repositories may add local
-guidance when a project needs different instructions.
+Proof that an encrypted backup restores to a working application. It breaks a sample app on purpose, restores it in throwaway containers, opens it in Chromium and keeps the receipt.
+
+### [ralph](https://github.com/seankoji-com/ralph)
+
+A terminal home for coding-agent loops, each in its own Git worktree, built to never delete unmerged work.
+
+## Also maintained
+
+Claude Code and OpenCode plugins ([claude-plugins](https://github.com/seankoji-com/claude-plugins), [opencode-session-cycler](https://github.com/seankoji-com/opencode-session-cycler), [opencode-localise-timestamps](https://github.com/seankoji-com/opencode-localise-timestamps), [agy-plugin-codex](https://github.com/seankoji-com/agy-plugin-codex)), a [Homebrew tap](https://github.com/seankoji-com/homebrew-tap) that ships the tools above, and a [zsh kit](https://github.com/orgs/seankoji-com/repositories?q=zsh) broken into plugins you can take one at a time. Organisation defaults and shared CI live in [.github](https://github.com/seankoji-com/.github).
+
+## How this organisation runs
+
+One public [.github](https://github.com/seankoji-com/.github) repository holds the code of conduct, contributing guide, security policy and the reusable GitHub Actions workflows every other repository calls. Nothing merges with a red check on the latest commit. On the projects that matter most, an AI reviewer also has to approve that exact revision. Green means this revision, not a previous one.
+
+## Contact
+
+Writing, CV and the full story: [seankoji.com](https://seankoji.com). Email: github@seankoji.com.
