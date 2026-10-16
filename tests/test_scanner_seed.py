@@ -767,8 +767,8 @@ class SourceContractTests(unittest.TestCase):
         for tool, job in document["jobs"].items():
             self.assertEqual(
                 job["runs-on"],
-                "${{ fromJSON(inputs.runner-json != '' && inputs.runner-json || "
-                "vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '[\"self-hosted\",\"Linux\"]' || "
+                "${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || "
+                "(vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '[\"self-hosted\",\"Linux\"]') || "
                 "'[\"ubuntu-latest\"]') }}",
             )
             scan = next(s for s in job["steps"] if s.get("id") == "scan")

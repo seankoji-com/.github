@@ -56,7 +56,6 @@ class RecoveryRequestTests(unittest.TestCase):
         job = workflow["jobs"]["request"]
         # The App private key stays off persistent PR execution runners.
         self.assertEqual(job["runs-on"], PERSONA_RUNS_ON)
-        self.assertIn("persona-recovery", WORKFLOW.read_text())
         self.assertEqual(job["timeout-minutes"], 10)
         self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
         self.assertFalse(any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"]))

@@ -48,9 +48,9 @@ class RunnerRoutingTests(unittest.TestCase):
                 }.get(path.name, '["self-hosted","Linux"]')
                 # Explicit overrides win; private-only org vars are available
                 # before scheduling for every event, without a payload lookup.
-                routing = ("${{ fromJSON(inputs.runner-json != '' && inputs.runner-json || "
-                           "vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '" + labels +
-                           "' || '[\"ubuntu-latest\"]') }}")
+                routing = ("${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || "
+                           "(vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '" + labels +
+                           "') || '[\"ubuntu-latest\"]') }}")
                 for job_name, job in config["jobs"].items():
                     with self.subTest(job=job_name):
                         self.assertEqual(job["runs-on"], routing)

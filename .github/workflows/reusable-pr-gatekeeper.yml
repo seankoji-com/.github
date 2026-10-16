@@ -59,7 +59,7 @@ on:
 
 jobs:
   all-checks-passed:
-    runs-on: ${{ fromJSON(inputs.runner-json != '' && inputs.runner-json || vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]' || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
+    runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 10
     steps:
       - name: Stage the evaluator
