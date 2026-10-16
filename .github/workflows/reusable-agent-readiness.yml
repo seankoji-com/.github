@@ -11,17 +11,21 @@ name: Reusable Agent Readiness
 # opt-in, the opt-out, and dated waivers all live in the repo under test and
 # take effect in the same PR. No hub round-trip, no redistribution.
 #
-# The caller chooses the runner. The safe default is GitHub-hosted because a
-# public pull request must never execute untrusted code on an organization
-# runner.
+# Explicit caller labels override routing. Private omissions use self-hosted
+# runners through the private-only org variable; public callers stay hosted.
 
 on:
   workflow_call:
     inputs:
+      # Omitted input uses capability-specific self-hosted labels when the org
+      # Actions variable PRIVATE_REPO_SELF_HOSTED is true (access: Private
+      # repositories only). Caller vars work for every event, including schedule;
+      # no event payload is needed. Public/unconfigured callers stay hosted.
+      # Explicit runner-json always wins. See README.md#runner-selection.
       runner-json:
-        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing.'
         type: string
-        default: '["ubuntu-latest"]'
+        default: ''
 
 permissions:
   contents: read
@@ -29,7 +33,7 @@ permissions:
 jobs:
   agent-readiness:
     name: agent-readiness
-    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 10
     env:
       GIT_LFS_SKIP_SMUDGE: '1'

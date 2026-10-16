@@ -48,12 +48,60 @@ Available reusable workflows include:
   multiple variants. Scope must be nonempty and contain only letters, digits,
   dot, underscore, slash, colon, `@` or hyphen.
 - [ShellSpec](.github/workflows/reusable-shellspec.yml) uses a pinned version on
-  a GitHub-hosted runner with zsh available. The caller's `.shellspec` selects
+  a runner with zsh available; private repositories should select the `mint` pool,
+  whose runner image includes zsh. The caller's `.shellspec` selects
   the shell, for example `--shell /bin/zsh`. The workflow needs `contents: read`.
 - [Issue triage](.github/workflows/reusable-issue-triage.yml) and
   [release markers](.github/workflows/released.yml) use `actions/github-script`.
   Callers selecting self-hosted runners must use Actions runner v2.327.1 or newer.
   Issue triage needs `issues: write` (and `pull-requests: read` for the PR-sync job).
+
+### Runner selection
+
+Set the organization Actions variable `PRIVATE_REPO_SELF_HOSTED` to `true`
+with repository access **Private repositories** before relying on omitted
+`runner-json` inputs. Do not expose it to public repositories or create
+repository-level overrides. No organization settings are changed by this repo.
+
+Every reusable with `runner-json` selects runners in this order:
+
+1. A nonempty explicit `runner-json` value, unchanged.
+2. When `vars.PRIVATE_REPO_SELF_HOSTED == 'true'`, the workflow's labels below.
+3. Otherwise `["ubuntu-latest"]`, for public callers and during provisioning.
+
+| Workflow | Private default labels | Capability |
+| --- | --- | --- |
+| `reusable-docker-build-push.yml` | `["self-hosted","Linux","X64","has-docker"]` | Docker daemon and x64 builds |
+| `reusable-link-check.yml` | `["self-hosted","Linux","X64"]` | Linux x64 Lychee binaries |
+| `reusable-shellspec.yml` | `["self-hosted","Linux","X64","mint"]` | zsh in the runner image |
+| All other `runner-json` reusables | `["self-hosted","Linux"]` | Architecture-independent scripts or setup actions |
+
+GitHub makes [`vars` available in `jobs.<job_id>.runs-on`](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability)
+and uses the [caller repository's variables for reusable workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/variables#configuration-variable-precedence).
+This routes push, pull_request, pull_request_target, schedule, workflow_dispatch,
+workflow_run and merge_group without reading `github.event.repository`.
+The [private-only access policy](https://docs.github.com/en/actions/concepts/workflows-and-actions/variables)
+keeps public callers, including public fork PRs, on hosted runners. GitHub sends
+[fork PR events to the base repository](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request),
+so its caller policy applies, not the head fork's visibility. Do not use this
+variable as an approval boundary for untrusted code in private repos.
+
+GitHub's [Dependabot restrictions](https://docs.github.com/en/code-security/reference/supply-chain-security/troubleshoot-dependabot/dependabot-on-actions)
+describe tokens and secrets, but do not establish configuration-variable
+availability. Verify omitted-input routing on a Dependabot-triggered run after
+provisioning. If the variable is unavailable, that run falls back to hosted;
+explicit self-hosted `runner-json` values avoid that residual. Unset variables
+also leave private omissions on hosted until the operator provisions them.
+
+Persona recovery handles the CI App private key, so it never uses the shared
+pool. It accepts only `PERSONA_RECOVERY_RUNS_ON` equal to the contracted JSON
+string `["self-hosted","persona-recovery"]`: ephemeral, single-use JIT runners
+in the `persona-recovery` group, restricted to
+`seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@refs/heads/main`.
+The group must allow all repositories, including private ones, and run no other
+workloads. Its runners need bash, curl, jq, gh and the runner's bundled Node.
+Repository variables override organization variables, so any unset or different
+value falls back to `ubuntu-latest` rather than selecting the shared pool.
 
 For example, a deployment workflow can publish the standard release marker:
 

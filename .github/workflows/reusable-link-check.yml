@@ -11,10 +11,15 @@ on:
         description: 'Additional lychee arguments'
         type: string
         default: '--verbose --no-progress "./**/*.md"'
+      # Omitted input uses capability-specific self-hosted labels when the org
+      # Actions variable PRIVATE_REPO_SELF_HOSTED is true (access: Private
+      # repositories only). Caller vars work for every event, including schedule;
+      # no event payload is needed. Public/unconfigured callers stay hosted.
+      # Explicit runner-json always wins. See README.md#runner-selection.
       runner-json:
-        description: 'JSON runner labels. Private callers may opt into self-hosted runners.'
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux","X64"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing.'
         type: string
-        default: '["ubuntu-latest"]'
+        default: ''
 
 permissions:
   contents: read
@@ -22,7 +27,7 @@ permissions:
 jobs:
   link-checker:
     name: Check Links
-    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux","X64"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 15
     steps:
       - name: Checkout repository

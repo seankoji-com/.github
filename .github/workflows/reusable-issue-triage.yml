@@ -11,10 +11,15 @@ on:
         description: 'Label that bypasses triage labeling'
         type: string
         default: 'ready'
+      # Omitted input uses capability-specific self-hosted labels when the org
+      # Actions variable PRIVATE_REPO_SELF_HOSTED is true (access: Private
+      # repositories only). Caller vars work for every event, including schedule;
+      # no event payload is needed. Public/unconfigured callers stay hosted.
+      # Explicit runner-json always wins. See README.md#runner-selection.
       runner-json:
-        description: 'JSON runner labels. Self-hosted runners must be v2.327.1 or newer for github-script v9.'
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing. Self-hosted runners must be v2.327.1 or newer for github-script v9.'
         type: string
-        default: '["ubuntu-latest"]'
+        default: ''
 
 permissions:
   issues: write
@@ -24,7 +29,7 @@ jobs:
   triage-issue:
     name: Auto-label New Issue
     if: github.event_name == 'issues' && github.event.action == 'opened'
-    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 5
     steps:
       - name: Add triage label
@@ -54,7 +59,7 @@ jobs:
   link-pr:
     name: Auto-label Issue with Linked PR
     if: github.event_name == 'pull_request' && (github.event.action == 'opened' || github.event.action == 'synchronize')
-    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 5
     steps:
       - name: Mark referenced issue as having PR

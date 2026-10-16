@@ -2,6 +2,18 @@ name: Reusable ShellSpec
 
 on:
   workflow_call:
+    inputs:
+      # Omitted input uses capability-specific self-hosted labels when the org
+      # Actions variable PRIVATE_REPO_SELF_HOSTED is true (access: Private
+      # repositories only). Caller vars work for every event, including schedule;
+      # no event payload is needed. Public/unconfigured callers stay hosted.
+      # Explicit runner-json always wins. See README.md#runner-selection.
+      # Private callers should pin the mint pool because its runner image bakes
+      # in zsh; other Linux pools may lack zsh and the sudo needed to install it.
+      runner-json:
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux","X64","mint"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing. The runner needs zsh or passwordless sudo apt-get.'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -9,7 +21,7 @@ permissions:
 jobs:
   test:
     name: ShellSpec
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux","X64","mint"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 10
     steps:
       - name: Checkout

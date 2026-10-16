@@ -13,23 +13,27 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
+# Callers use the dedicated, workflow-restricted, ephemeral persona-recovery
+# runner group named by the org variable; an unset or invalid variable falls
+# back to a fresh GitHub-hosted runner.
+PERSONA_RUNS_ON = ("${{ vars.PERSONA_RECOVERY_RUNS_ON == '[\"self-hosted\",\"persona-recovery\"]' && "
+                   "fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }}")
 
 
 class RecoveryRequestTests(unittest.TestCase):
-    def test_all_recovery_jobs_use_explicit_hosted_runners(self):
+    def test_all_recovery_jobs_use_isolated_runners(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
-        # This workflow accepts the App key. Keep every job off persistent
-        # runners, including future jobs and reusable-workflow delegations.
-        # This is a deliberately narrow routing policy, not a validator for
-        # all legal runs-on forms. New labels or forms require a trust review;
-        # a custom runner's label alone does not prove GitHub hosts it.
+        # This workflow accepts the App key. Keep every job off the shared
+        # persistent pool, including future jobs and reusable-workflow
+        # delegations. The only accepted form is the dedicated
+        # persona-recovery group named by the org variable, with a
+        # GitHub-hosted fallback while it is unset or invalid. New labels or
+        # forms require a trust review.
         for name, job in workflow["jobs"].items():
             with self.subTest(job=name):
                 self.assertNotIn("uses", job)
-                runner = job.get("runs-on")
-                self.assertIsInstance(runner, str)
-                self.assertRegex(runner, r"\A(?:ubuntu|windows|macos)-(?:latest|[0-9]+(?:\.[0-9]+)*)\Z",
-                                 "recovery jobs must use an explicit GitHub-hosted runner")
+                self.assertEqual(job.get("runs-on"), PERSONA_RUNS_ON,
+                                 "recovery jobs must use the dedicated runner group or a hosted fallback")
 
     def test_caller_uses_only_pr_identity_and_is_advisory(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
@@ -51,7 +55,7 @@ class RecoveryRequestTests(unittest.TestCase):
         })
         job = workflow["jobs"]["request"]
         # The App private key stays off persistent PR execution runners.
-        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["runs-on"], PERSONA_RUNS_ON)
         self.assertEqual(job["timeout-minutes"], 10)
         self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "read"})
         self.assertFalse(any(s.get("uses", "").startswith("actions/checkout") for s in job["steps"]))
