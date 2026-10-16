@@ -1,8 +1,8 @@
 name: Reusable Static Analysis
 
 # Runs Semgrep and zizmor against the checked-out PR content. The caller may
-# choose the runner. Private repositories default to self-hosted; public
-# repositories must use the GitHub-hosted default.
+# choose the runner. Private repositories must pass self-hosted labels; public
+# repositories keep the GitHub-hosted default.
 #
 # Non-blocking by design: both the install and scan step in each job carry
 # `continue-on-error: true`, so a tool failure never turns the check run red.
@@ -13,17 +13,14 @@ name: Reusable Static Analysis
 on:
   workflow_call:
     inputs:
-      # Omitted runner-json routes by repository visibility: private repos
-      # get the self-hosted labels below, public repos get ubuntu-latest.
-      # github.event.repository.private decides for every event that carries
-      # a repository (all except schedule). A schedule payload has none, so
-      # the org variable PRIVATE_REPO_SELF_HOSTED, visible only to private
-      # repositories, decides there. A public repo's events never read the
-      # variable, so fork pull requests cannot reach an organization runner.
+      # Keep the hosted default for public/fork callers. Private callers must
+      # pass runner-json explicitly: github.event.repository is absent on
+      # schedule, and no event-independent visibility context is available
+      # before runner selection. See README.md#runner-selection for the gap.
       runner-json:
-        description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] in private repos, ubuntu-latest in public ones.'
+        description: 'JSON runner labels. Default: ubuntu-latest. Private callers must pass ["self-hosted","Linux"].'
         type: string
-        default: ${{ (github.event.repository.private || (!github.event.repository && vars.PRIVATE_REPO_SELF_HOSTED == 'true')) && '["self-hosted","Linux"]' || '["ubuntu-latest"]' }}
+        default: '["ubuntu-latest"]'
 
 # A reusable workflow can never hold more than its caller, so the caller must
 # not declare a narrower `permissions:` block than this.
@@ -43,7 +40,7 @@ env:
 jobs:
   semgrep:
     name: semgrep
-    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    runs-on: ${{ fromJSON(inputs.runner-json) }} # runner-keep-hosted (public-compatible default; private callers must pass self-hosted runner-json)
     timeout-minutes: 15
     steps:
       - name: Checkout
@@ -180,7 +177,7 @@ jobs:
 
   zizmor:
     name: zizmor
-    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    runs-on: ${{ fromJSON(inputs.runner-json) }} # runner-keep-hosted (public-compatible default; private callers must pass self-hosted runner-json)
     timeout-minutes: 15
     steps:
       - name: Checkout

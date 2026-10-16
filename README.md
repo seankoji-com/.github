@@ -48,7 +48,7 @@ Available reusable workflows include:
   multiple variants. Scope must be nonempty and contain only letters, digits,
   dot, underscore, slash, colon, `@` or hyphen.
 - [ShellSpec](.github/workflows/reusable-shellspec.yml) uses a pinned version on
-  a runner with zsh available; private repositories default to the `mint` pool,
+  a runner with zsh available; private repositories should select the `mint` pool,
   whose runner image includes zsh. The caller's `.shellspec` selects
   the shell, for example `--shell /bin/zsh`. The workflow needs `contents: read`.
 - [Issue triage](.github/workflows/reusable-issue-triage.yml) and
@@ -58,25 +58,29 @@ Available reusable workflows include:
 
 ### Runner selection
 
-Every reusable workflow with a `runner-json` input picks its default by
-repository visibility, so a private caller that omits `runner-json` does not
-spend GitHub-hosted minutes. Private repositories default to self-hosted
-labels (each workflow's input description lists them), and public
-repositories default to `ubuntu-latest`, because organization runners must not
-execute fork pull-request code. `github.event.repository.private` decides for
-every event that carries a repository. A `schedule` payload carries none, so
-the organization Actions variable `PRIVATE_REPO_SELF_HOSTED`, set to `true`
-with repository access limited to **Private repositories**, decides there.
-Until that variable exists, a private scheduled caller that omits
-`runner-json` still runs on `ubuntu-latest`. An explicit `runner-json` always
-wins.
+Every reusable workflow with a `runner-json` input retains its `ubuntu-latest`
+default for public callers. **Private callers must pass `runner-json` explicitly**
+using the self-hosted labels in each workflow's input description. This works
+for push, pull_request, pull_request_target, schedule, workflow_dispatch,
+workflow_run and merge_group without depending on event payload visibility.
+
+Omission safety remains a gap: `github.event.repository` is absent for schedule,
+and GitHub exposes no event-independent repository visibility in the
+[contexts available before runner selection](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
+Inferring private from a missing field would send public scheduled jobs to org
+runners. An unprovisioned visibility variable would still let private scheduled
+jobs spend hosted minutes. Keep the compatible defaults until a reliable
+mechanism exists; private caller changes are required separately. Public fork
+code must stay on hosted runners.
 
 Persona recovery handles the CI App private key, so it never uses the shared
-pool. Private callers run on the runners named by the organization variable
+pool. It runs on the runners named by the organization variable
 `PERSONA_RECOVERY_RUNS_ON` (`["self-hosted","persona-recovery"]`): ephemeral,
-single-use runners in the `persona-recovery` group, which only this workflow
-on `main` may use. Public callers, and every caller while the variable is
-unset, use `ubuntu-latest`.
+single-use runners in the `persona-recovery` group, restricted to
+`seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@refs/heads/main`.
+The group must allow all repositories, including private ones, and run no other
+workloads. Its runners need bash, curl, jq, gh and the runner's bundled Node.
+While the variable is unset, every caller falls back to `ubuntu-latest`.
 
 For example, a deployment workflow can publish the standard release marker:
 

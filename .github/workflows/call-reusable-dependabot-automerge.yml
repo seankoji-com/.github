@@ -16,5 +16,5 @@ jobs:
   auto-merge:
     uses: seankoji-com/.github/.github/workflows/reusable-dependabot-automerge.yml@main
     with:
-      runner-json: '["ubuntu-latest"]'
+      runner-json: '["ubuntu-latest"]' # runner-keep-hosted (public repo: hosted minutes are free; fork PRs must not reach org runners)
     secrets: inherit

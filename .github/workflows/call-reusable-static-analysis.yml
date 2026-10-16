@@ -30,4 +30,4 @@ jobs:
     # not found" check on the very PR that introduces it.
     uses: ./.github/workflows/reusable-static-analysis.yml
     with:
-      runner-json: '["ubuntu-latest"]'
+      runner-json: '["ubuntu-latest"]' # runner-keep-hosted (public repo: hosted minutes are free; fork PRs must not reach org runners)

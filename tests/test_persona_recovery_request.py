@@ -13,10 +13,10 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
-# Private callers use the dedicated, workflow-restricted, ephemeral
-# persona-recovery runner group named by the org variable; public callers and
-# an unset variable fall back to a fresh GitHub-hosted runner.
-PERSONA_RUNS_ON = ("${{ github.event.repository.private && vars.PERSONA_RECOVERY_RUNS_ON && "
+# Callers use the dedicated, workflow-restricted, ephemeral persona-recovery
+# runner group named by the org variable; an unset variable falls back to a
+# fresh GitHub-hosted runner.
+PERSONA_RUNS_ON = ("${{ vars.PERSONA_RECOVERY_RUNS_ON && "
                    "fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }}")
 
 
@@ -26,8 +26,8 @@ class RecoveryRequestTests(unittest.TestCase):
         # This workflow accepts the App key. Keep every job off the shared
         # persistent pool, including future jobs and reusable-workflow
         # delegations. The only accepted form is the dedicated
-        # persona-recovery group named by the org variable, for private
-        # callers, with a GitHub-hosted fallback. This is a deliberately narrow
+        # persona-recovery group named by the org variable, with a
+        # GitHub-hosted fallback while it is unset. This is a deliberately narrow
         # routing policy; new labels or forms require a trust review.
         for name, job in workflow["jobs"].items():
             with self.subTest(job=name):

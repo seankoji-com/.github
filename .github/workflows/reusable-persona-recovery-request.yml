@@ -23,19 +23,21 @@ on:
 jobs:
   request:
     # This job handles an App private key, so it never runs on the shared
-    # pool that also executes pull-request code. Private callers use the
-    # runners named by the org variable PERSONA_RECOVERY_RUNS_ON
-    # (["self-hosted","persona-recovery"]): ephemeral single-use JIT runners
-    # in the dedicated persona-recovery group, which accepts only this
-    # workflow at refs/heads/main and runs no other workloads. The job needs
-    # bash, curl, jq, gh and the runner's bundled Node. While the variable is
-    # unset, and for public callers (hosted minutes are free there), the job
-    # uses a fresh GitHub-hosted runner, so merging this before the runner
+    # pool that also executes pull-request code. It runs on the runners named
+    # by the org Actions variable PERSONA_RECOVERY_RUNS_ON, whose value is
+    # ["self-hosted","persona-recovery"]: ephemeral, single-use JIT runners in
+    # the dedicated persona-recovery runner group. That group is open to all
+    # repositories, including private ones, with workflow access restricted to
+    # seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@refs/heads/main.
+    # Its runners take no other workloads. The job needs
+    # bash, curl, jq, gh and the runner's bundled Node (for
+    # create-github-app-token). While the variable is unset, the job falls
+    # back to a fresh GitHub-hosted runner, so merging this before the runner
     # group exists cannot strand jobs in the queue. If scheduling fails, none
     # of the step-level warnings run. The private controller's scheduled
     # sweep (every 15 minutes) can dispatch missing reviews independently,
     # subject to active-run/retry limits and available self-hosted capacity.
-    runs-on: ${{ github.event.repository.private && vars.PERSONA_RECOVERY_RUNS_ON && fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }} # runner-keep-hosted (public callers and unset PERSONA_RECOVERY_RUNS_ON only; App private-key isolation)
+    runs-on: ${{ vars.PERSONA_RECOVERY_RUNS_ON && fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }} # runner-keep-hosted (fallback only while PERSONA_RECOVERY_RUNS_ON is unset; App private-key isolation)
     timeout-minutes: 10
     permissions:
       contents: read
