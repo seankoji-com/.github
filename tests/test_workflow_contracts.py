@@ -18,7 +18,7 @@ def workflow(name):
 
 
 class RunnerRoutingTests(unittest.TestCase):
-    """Preserve public defaults while private callers select explicit labels."""
+    """Keep public callers hosted and private omissions on capable runners."""
 
     def test_runner_json_remains_an_explicit_override_for_every_job(self):
         expected = {
@@ -38,15 +38,37 @@ class RunnerRoutingTests(unittest.TestCase):
                 continue
             checked.add(path.name)
             with self.subTest(workflow=path.name):
-                # No event-payload or unprovisioned variable may silently decide
-                # whether public/fork code executes on organization runners.
-                self.assertEqual(json.loads(spec["default"]), ["ubuntu-latest"])
+                self.assertEqual(spec["default"], "")
                 self.assertEqual(spec["type"], "string")
-                self.assertIn("Private callers must pass", spec["description"])
+                self.assertIn("PRIVATE_REPO_SELF_HOSTED=true", spec["description"])
+                labels = {
+                    "reusable-docker-build-push.yml": '["self-hosted","Linux","X64","has-docker"]',
+                    "reusable-link-check.yml": '["self-hosted","Linux","X64"]',
+                    "reusable-shellspec.yml": '["self-hosted","Linux","X64","mint"]',
+                }.get(path.name, '["self-hosted","Linux"]')
+                # Explicit overrides win; private-only org vars are available
+                # before scheduling for every event, without a payload lookup.
+                routing = ("${{ fromJSON(inputs.runner-json != '' && inputs.runner-json || "
+                           "vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '" + labels +
+                           "' || '[\"ubuntu-latest\"]') }}")
                 for job_name, job in config["jobs"].items():
                     with self.subTest(job=job_name):
-                        self.assertEqual(job["runs-on"], "${{ fromJSON(inputs.runner-json) }}")
+                        self.assertEqual(job["runs-on"], routing)
         self.assertEqual(checked, expected)
+
+    def test_private_only_provisioning_and_public_caller_overrides(self):
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("**Private repositories**", readme)
+        self.assertIn("`PRIVATE_REPO_SELF_HOSTED` to `true`", readme)
+        checked = set()
+        for path in (ROOT / ".github" / "workflows").glob("call-*.yml"):
+            for job in yaml.safe_load(path.read_text())["jobs"].values():
+                target = job.get("uses", "").split("/")[-1].split("@")[0]
+                call = (workflow(target).get(True) or {}).get("workflow_call") or {}
+                if "runner-json" in (call.get("inputs") or {}):
+                    self.assertEqual(json.loads(job["with"]["runner-json"]), ["ubuntu-latest"])
+                    checked.add(path.name)
+        self.assertEqual(len(checked), 4)
 
 
 class NodeWorkflowTests(unittest.TestCase):
@@ -290,7 +312,6 @@ printf '# staged fixture\\n' > "$destination"
         config = workflow("reusable-shellspec.yml")
         self.assertEqual(config["permissions"], {"contents": "read"})
         job = config["jobs"]["test"]
-        self.assertEqual(job["runs-on"], "${{ fromJSON(inputs.runner-json) }}")
         self.assertEqual(job["timeout-minutes"], 10)
         checkout, install, fetch, run = job["steps"]
         self.assertFalse(checkout["with"]["persist-credentials"])

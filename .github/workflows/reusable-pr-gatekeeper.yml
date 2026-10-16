@@ -22,14 +22,15 @@ on:
         description: 'Review signal run to resolve through trusted GitHub metadata.'
         type: string
         default: ''
-      # Keep the hosted default for public/fork callers. Private callers must
-      # pass runner-json explicitly: github.event.repository is absent on
-      # schedule, and no event-independent visibility context is available
-      # before runner selection. See README.md#runner-selection for the gap.
+      # Omitted input uses capability-specific self-hosted labels when the org
+      # Actions variable PRIVATE_REPO_SELF_HOSTED is true (access: Private
+      # repositories only). Caller vars work for every event, including schedule;
+      # no event payload is needed. Public/unconfigured callers stay hosted.
+      # Explicit runner-json always wins. See README.md#runner-selection.
       runner-json:
-        description: 'JSON runner labels. Default: ubuntu-latest. Private callers must pass ["self-hosted","Linux"].'
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing.'
         type: string
-        default: '["ubuntu-latest"]'
+        default: ''
       seed:
         description: 'Post an in-progress seed check and exit without evaluating.'
         type: boolean
@@ -58,7 +59,7 @@ on:
 
 jobs:
   all-checks-passed:
-    runs-on: ${{ fromJSON(inputs.runner-json) }} # runner-keep-hosted (public-compatible default; private callers must pass self-hosted runner-json)
+    runs-on: ${{ fromJSON(inputs.runner-json != '' && inputs.runner-json || vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]' || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 10
     steps:
       - name: Stage the evaluator

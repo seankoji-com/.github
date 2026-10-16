@@ -11,21 +11,21 @@ name: Reusable Agent Readiness
 # opt-in, the opt-out, and dated waivers all live in the repo under test and
 # take effect in the same PR. No hub round-trip, no redistribution.
 #
-# The caller chooses the runner. Private callers must pass self-hosted labels;
-# public callers keep the hosted default so untrusted fork code never runs on
-# an organization runner.
+# Explicit caller labels override routing. Private omissions use self-hosted
+# runners through the private-only org variable; public callers stay hosted.
 
 on:
   workflow_call:
     inputs:
-      # Keep the hosted default for public/fork callers. Private callers must
-      # pass runner-json explicitly: github.event.repository is absent on
-      # schedule, and no event-independent visibility context is available
-      # before runner selection. See README.md#runner-selection for the gap.
+      # Omitted input uses capability-specific self-hosted labels when the org
+      # Actions variable PRIVATE_REPO_SELF_HOSTED is true (access: Private
+      # repositories only). Caller vars work for every event, including schedule;
+      # no event payload is needed. Public/unconfigured callers stay hosted.
+      # Explicit runner-json always wins. See README.md#runner-selection.
       runner-json:
-        description: 'JSON runner labels. Default: ubuntu-latest. Private callers must pass ["self-hosted","Linux"].'
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing.'
         type: string
-        default: '["ubuntu-latest"]'
+        default: ''
 
 permissions:
   contents: read
@@ -33,7 +33,7 @@ permissions:
 jobs:
   agent-readiness:
     name: agent-readiness
-    runs-on: ${{ fromJSON(inputs.runner-json) }} # runner-keep-hosted (public-compatible default; private callers must pass self-hosted runner-json)
+    runs-on: ${{ fromJSON(inputs.runner-json != '' && inputs.runner-json || vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]' || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 10
     env:
       GIT_LFS_SKIP_SMUDGE: '1'

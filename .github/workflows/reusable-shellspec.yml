@@ -3,16 +3,17 @@ name: Reusable ShellSpec
 on:
   workflow_call:
     inputs:
-      # Keep the hosted default for public/fork callers. Private callers must
-      # pass runner-json explicitly: github.event.repository is absent on
-      # schedule, and no event-independent visibility context is available
-      # before runner selection. See README.md#runner-selection for the gap.
+      # Omitted input uses capability-specific self-hosted labels when the org
+      # Actions variable PRIVATE_REPO_SELF_HOSTED is true (access: Private
+      # repositories only). Caller vars work for every event, including schedule;
+      # no event payload is needed. Public/unconfigured callers stay hosted.
+      # Explicit runner-json always wins. See README.md#runner-selection.
       # Private callers should pin the mint pool because its runner image bakes
       # in zsh; other Linux pools may lack zsh and the sudo needed to install it.
       runner-json:
-        description: 'JSON runner labels. Default: ubuntu-latest. Private callers must pass ["self-hosted","Linux","X64","mint"]. The runner needs zsh or passwordless sudo apt-get.'
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux","X64","mint"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing. The runner needs zsh or passwordless sudo apt-get.'
         type: string
-        default: '["ubuntu-latest"]'
+        default: ''
 
 permissions:
   contents: read
@@ -20,7 +21,7 @@ permissions:
 jobs:
   test:
     name: ShellSpec
-    runs-on: ${{ fromJSON(inputs.runner-json) }} # runner-keep-hosted (public-compatible default; private callers must pass self-hosted runner-json)
+    runs-on: ${{ fromJSON(inputs.runner-json != '' && inputs.runner-json || vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux","X64","mint"]' || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 10
     steps:
       - name: Checkout

@@ -58,29 +58,50 @@ Available reusable workflows include:
 
 ### Runner selection
 
-Every reusable workflow with a `runner-json` input retains its `ubuntu-latest`
-default for public callers. **Private callers must pass `runner-json` explicitly**
-using the self-hosted labels in each workflow's input description. This works
-for push, pull_request, pull_request_target, schedule, workflow_dispatch,
-workflow_run and merge_group without depending on event payload visibility.
+Set the organization Actions variable `PRIVATE_REPO_SELF_HOSTED` to `true`
+with repository access **Private repositories** before relying on omitted
+`runner-json` inputs. Do not expose it to public repositories or create
+repository-level overrides. No organization settings are changed by this repo.
 
-Omission safety remains a gap: `github.event.repository` is absent for schedule,
-and GitHub exposes no event-independent repository visibility in the
-[contexts available before runner selection](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability).
-Inferring private from a missing field would send public scheduled jobs to org
-runners. An unprovisioned visibility variable would still let private scheduled
-jobs spend hosted minutes. Keep the compatible defaults until a reliable
-mechanism exists; private caller changes are required separately. Public fork
-code must stay on hosted runners.
+Every reusable with `runner-json` selects runners in this order:
+
+1. A nonempty explicit `runner-json` value, unchanged.
+2. When `vars.PRIVATE_REPO_SELF_HOSTED == 'true'`, the workflow's labels below.
+3. Otherwise `["ubuntu-latest"]`, for public callers and during provisioning.
+
+| Workflow | Private default labels | Capability |
+| --- | --- | --- |
+| `reusable-docker-build-push.yml` | `["self-hosted","Linux","X64","has-docker"]` | Docker daemon and x64 builds |
+| `reusable-link-check.yml` | `["self-hosted","Linux","X64"]` | Linux x64 Lychee binaries |
+| `reusable-shellspec.yml` | `["self-hosted","Linux","X64","mint"]` | zsh in the runner image |
+| All other `runner-json` reusables | `["self-hosted","Linux"]` | Architecture-independent scripts or setup actions |
+
+GitHub makes [`vars` available in `jobs.<job_id>.runs-on`](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability)
+and uses the [caller repository's variables for reusable workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/variables#configuration-variable-precedence).
+This routes push, pull_request, pull_request_target, schedule, workflow_dispatch,
+workflow_run and merge_group without reading `github.event.repository`.
+The [private-only access policy](https://docs.github.com/en/actions/concepts/workflows-and-actions/variables)
+keeps public callers, including public fork PRs, on hosted runners. GitHub sends
+[fork PR events to the base repository](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request),
+so its caller policy applies, not the head fork's visibility. Do not use this
+variable as an approval boundary for untrusted code in private repos.
+
+GitHub's [Dependabot restrictions](https://docs.github.com/en/code-security/reference/supply-chain-security/troubleshoot-dependabot/dependabot-on-actions)
+describe tokens and secrets, but do not establish configuration-variable
+availability. Verify omitted-input routing on a Dependabot-triggered run after
+provisioning. If the variable is unavailable, that run falls back to hosted;
+explicit self-hosted `runner-json` values avoid that residual. Unset variables
+also leave private omissions on hosted until the operator provisions them.
 
 Persona recovery handles the CI App private key, so it never uses the shared
-pool. It runs on the runners named by the organization variable
-`PERSONA_RECOVERY_RUNS_ON` (`["self-hosted","persona-recovery"]`): ephemeral,
-single-use runners in the `persona-recovery` group, restricted to
+pool. It accepts only `PERSONA_RECOVERY_RUNS_ON` equal to the contracted JSON
+string `["self-hosted","persona-recovery"]`: ephemeral, single-use JIT runners
+in the `persona-recovery` group, restricted to
 `seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@refs/heads/main`.
 The group must allow all repositories, including private ones, and run no other
 workloads. Its runners need bash, curl, jq, gh and the runner's bundled Node.
-While the variable is unset, every caller falls back to `ubuntu-latest`.
+Repository variables override organization variables, so any unset or different
+value falls back to `ubuntu-latest` rather than selecting the shared pool.
 
 For example, a deployment workflow can publish the standard release marker:
 

@@ -14,9 +14,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/reusable-persona-recovery-request.yml"
 # Callers use the dedicated, workflow-restricted, ephemeral persona-recovery
-# runner group named by the org variable; an unset variable falls back to a
-# fresh GitHub-hosted runner.
-PERSONA_RUNS_ON = ("${{ vars.PERSONA_RECOVERY_RUNS_ON && "
+# runner group named by the org variable; an unset or invalid variable falls
+# back to a fresh GitHub-hosted runner.
+PERSONA_RUNS_ON = ("${{ vars.PERSONA_RECOVERY_RUNS_ON == '[\"self-hosted\",\"persona-recovery\"]' && "
                    "fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }}")
 
 
@@ -27,8 +27,8 @@ class RecoveryRequestTests(unittest.TestCase):
         # persistent pool, including future jobs and reusable-workflow
         # delegations. The only accepted form is the dedicated
         # persona-recovery group named by the org variable, with a
-        # GitHub-hosted fallback while it is unset. This is a deliberately narrow
-        # routing policy; new labels or forms require a trust review.
+        # GitHub-hosted fallback while it is unset or invalid. New labels or
+        # forms require a trust review.
         for name, job in workflow["jobs"].items():
             with self.subTest(job=name):
                 self.assertNotIn("uses", job)

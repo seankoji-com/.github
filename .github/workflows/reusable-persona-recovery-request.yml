@@ -31,13 +31,15 @@ jobs:
     # seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@refs/heads/main.
     # Its runners take no other workloads. The job needs
     # bash, curl, jq, gh and the runner's bundled Node (for
-    # create-github-app-token). While the variable is unset, the job falls
+    # create-github-app-token). Repository variables override org variables;
+    # accept only the contracted JSON string to prevent shared-pool routing.
+    # While the variable is unset or has any other value, the job falls
     # back to a fresh GitHub-hosted runner, so merging this before the runner
     # group exists cannot strand jobs in the queue. If scheduling fails, none
     # of the step-level warnings run. The private controller's scheduled
     # sweep (every 15 minutes) can dispatch missing reviews independently,
     # subject to active-run/retry limits and available self-hosted capacity.
-    runs-on: ${{ vars.PERSONA_RECOVERY_RUNS_ON && fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }} # runner-keep-hosted (fallback only while PERSONA_RECOVERY_RUNS_ON is unset; App private-key isolation)
+    runs-on: ${{ vars.PERSONA_RECOVERY_RUNS_ON == '["self-hosted","persona-recovery"]' && fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }} # runner-keep-hosted (fallback while PERSONA_RECOVERY_RUNS_ON is unset/invalid; App private-key isolation)
     timeout-minutes: 10
     permissions:
       contents: read
