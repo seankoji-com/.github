@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # runner-keep-hosted (runs only in this public repo; hosted minutes are free)
     timeout-minutes: 10
     steps:
       - name: Checkout

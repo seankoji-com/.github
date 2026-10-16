@@ -753,7 +753,7 @@ class CoalescedRefreshTests(unittest.TestCase):
         refresh = steps[1]
         self.assertEqual(refresh["env"]["REQUIRE_CI"], "${{ inputs.reconcile_open }}")
         self.assertEqual(config["jobs"]["all-checks-passed"]["runs-on"], "${{ fromJSON(inputs.runner-json) }}")
-        self.assertEqual(config[True]["workflow_call"]["inputs"]["runner-json"]["default"], '["ubuntu-latest"]')
+        self.assertIn("'[\"ubuntu-latest\"]'", config[True]["workflow_call"]["inputs"]["runner-json"]["default"])
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             (root / "pr-gatekeeper.py").write_text(

@@ -2,6 +2,20 @@ name: Reusable ShellSpec
 
 on:
   workflow_call:
+    inputs:
+      # Omitted runner-json routes by repository visibility: private repos
+      # get the self-hosted labels below, public repos get ubuntu-latest.
+      # github.event.repository.private decides for every event that carries
+      # a repository (all except schedule). A schedule payload has none, so
+      # the org variable PRIVATE_REPO_SELF_HOSTED, visible only to private
+      # repositories, decides there. A public repo's events never read the
+      # variable, so fork pull requests cannot reach an organization runner.
+      # The private default pins the mint pool because its runner image bakes
+      # in zsh; other Linux pools may lack zsh and the sudo needed to install it.
+      runner-json:
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux","X64","mint"] in private repos, ubuntu-latest in public ones. The runner needs zsh or passwordless sudo apt-get.'
+        type: string
+        default: ${{ (github.event.repository.private || (!github.event.repository && vars.PRIVATE_REPO_SELF_HOSTED == 'true')) && '["self-hosted","Linux","X64","mint"]' || '["ubuntu-latest"]' }}
 
 permissions:
   contents: read
@@ -9,7 +23,7 @@ permissions:
 jobs:
   test:
     name: ShellSpec
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
     timeout-minutes: 10
     steps:
       - name: Checkout

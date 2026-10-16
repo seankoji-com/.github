@@ -763,7 +763,7 @@ class SourceContractTests(unittest.TestCase):
         self.assertEqual(document["env"], {"PIN_PIP": "25.2", "PIN_SEMGREP": "1.176.0",
                                            "PIN_SEMGREP_OTEL": "0.58b0", "PIN_ZIZMOR": "1.30.0"})
         self.assertEqual(document["permissions"], {"contents": "read"})
-        self.assertEqual(document[True]["workflow_call"]["inputs"]["runner-json"]["default"], '["ubuntu-latest"]')
+        self.assertIn("'[\"ubuntu-latest\"]'", document[True]["workflow_call"]["inputs"]["runner-json"]["default"])
         for tool, job in document["jobs"].items():
             self.assertEqual(job["runs-on"], "${{ fromJSON(inputs.runner-json) }}")
             scan = next(s for s in job["steps"] if s.get("id") == "scan")

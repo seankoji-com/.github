@@ -22,13 +22,20 @@ on:
 
 jobs:
   request:
-    # This job handles an App private key. Use a fresh hosted runner rather
-    # than the persistent pool that also executes pull-request code.
-    # Private callers need available hosted minutes. If scheduling fails,
-    # none of the step-level warnings run. The private controller's scheduled
+    # This job handles an App private key, so it never runs on the shared
+    # pool that also executes pull-request code. Private callers use the
+    # runners named by the org variable PERSONA_RECOVERY_RUNS_ON
+    # (["self-hosted","persona-recovery"]): ephemeral single-use JIT runners
+    # in the dedicated persona-recovery group, which accepts only this
+    # workflow at refs/heads/main and runs no other workloads. The job needs
+    # bash, curl, jq, gh and the runner's bundled Node. While the variable is
+    # unset, and for public callers (hosted minutes are free there), the job
+    # uses a fresh GitHub-hosted runner, so merging this before the runner
+    # group exists cannot strand jobs in the queue. If scheduling fails, none
+    # of the step-level warnings run. The private controller's scheduled
     # sweep (every 15 minutes) can dispatch missing reviews independently,
     # subject to active-run/retry limits and available self-hosted capacity.
-    runs-on: ubuntu-latest # runner-keep-hosted (App private-key isolation)
+    runs-on: ${{ github.event.repository.private && vars.PERSONA_RECOVERY_RUNS_ON && fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }} # runner-keep-hosted (public callers and unset PERSONA_RECOVERY_RUNS_ON only; App private-key isolation)
     timeout-minutes: 10
     permissions:
       contents: read

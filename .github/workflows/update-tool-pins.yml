@@ -29,7 +29,7 @@ jobs:
     # A schedule payload carries no repository object, so test the event first.
     # Manual runs from a feature branch must not open a PR against itself.
     if: github.event_name == 'schedule' || github.ref_name == github.event.repository.default_branch
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # runner-keep-hosted (runs only in this public repo; hosted minutes are free)
     timeout-minutes: 20
     permissions:
       contents: read
@@ -116,7 +116,7 @@ jobs:
 
   publish:
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # runner-keep-hosted (runs only in this public repo; hosted minutes are free)
     timeout-minutes: 10
     # No GITHUB_TOKEN write scope here, and no GH_TOKEN aimed at one. This job
     # rewrites pins inside workflow files, and GITHUB_TOKEN can never carry the

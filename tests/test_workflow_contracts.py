@@ -17,6 +17,72 @@ def workflow(name):
     return yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text())
 
 
+ROUTING_DEFAULT = re.compile(
+    r"\$\{\{ \(github\.event\.repository\.private \|\| \(!github\.event\.repository && "
+    r"vars\.PRIVATE_REPO_SELF_HOSTED == 'true'\)\) && '(\[[^']+\])' \|\| '\[\"ubuntu-latest\"\]' \}\}"
+)
+
+
+def evaluate_routing_default(default, event, variables):
+    """Evaluate the runner-json default the way GitHub does for one event payload."""
+    labels = ROUTING_DEFAULT.fullmatch(default).group(1)
+    repository = event.get("repository")
+    private = bool(repository and repository.get("private"))
+    if private or (repository is None and variables.get("PRIVATE_REPO_SELF_HOSTED") == "true"):
+        return json.loads(labels)
+    return ["ubuntu-latest"]
+
+
+class RunnerRoutingTests(unittest.TestCase):
+    """An omitted runner-json must keep private callers off GitHub-hosted runners."""
+
+    def reusables(self):
+        for path in sorted((ROOT / ".github" / "workflows").glob("*.yml")):
+            config = yaml.safe_load(path.read_text())
+            call = (config.get("on") or config.get(True) or {})
+            call = call.get("workflow_call") if isinstance(call, dict) else None
+            inputs = (call or {}).get("inputs") or {}
+            if "runner-json" in inputs:
+                yield path.name, config, inputs["runner-json"]
+
+    def test_every_runner_json_default_routes_by_visibility(self):
+        names = [name for name, _, _ in self.reusables()]
+        self.assertIn("reusable-shellspec.yml", names)
+        self.assertGreaterEqual(len(names), 10)
+        # Payloads by event: every type the fleet's callers use carries a
+        # repository object except schedule.
+        with_repo = ("push", "pull_request", "pull_request_target", "workflow_dispatch",
+                     "workflow_run", "merge_group")
+        for name, config, spec in self.reusables():
+            with self.subTest(workflow=name):
+                default = spec["default"]
+                match = ROUTING_DEFAULT.fullmatch(default)
+                self.assertIsNotNone(match, "runner-json default must use the visibility routing expression")
+                labels = json.loads(match.group(1))
+                self.assertEqual(labels[:2], ["self-hosted", "Linux"])
+                self.assertIn(match.group(1), spec["description"])
+                for event_name in with_repo:
+                    for private, variable in ((True, None), (True, "true"), (False, None), (False, "true")):
+                        event = {"repository": {"private": private}}
+                        variables = {"PRIVATE_REPO_SELF_HOSTED": variable} if variable else {}
+                        expected = labels if private else ["ubuntu-latest"]
+                        with self.subTest(event=event_name, private=private, variable=variable):
+                            self.assertEqual(evaluate_routing_default(default, event, variables), expected)
+                # A schedule payload has no repository; the private-only org variable decides.
+                self.assertEqual(evaluate_routing_default(default, {"schedule": "0 0 * * *"},
+                                                          {"PRIVATE_REPO_SELF_HOSTED": "true"}), labels)
+                self.assertEqual(evaluate_routing_default(default, {"schedule": "0 0 * * *"}, {}),
+                                 ["ubuntu-latest"])
+                for job_name, job in config["jobs"].items():
+                    with self.subTest(job=job_name):
+                        self.assertEqual(job["runs-on"], "${{ fromJSON(inputs.runner-json) }}")
+
+    def test_routing_variable_is_documented(self):
+        readme = (ROOT / "README.md").read_text()
+        self.assertIn("PRIVATE_REPO_SELF_HOSTED", readme)
+        self.assertIn("Private repositories", readme)
+
+
 class NodeWorkflowTests(unittest.TestCase):
     def setUp(self):
         self.job = workflow("reusable-node-ci.yml")["jobs"]["validate"]
@@ -258,7 +324,7 @@ printf '# staged fixture\\n' > "$destination"
         config = workflow("reusable-shellspec.yml")
         self.assertEqual(config["permissions"], {"contents": "read"})
         job = config["jobs"]["test"]
-        self.assertEqual(job["runs-on"], "ubuntu-latest")
+        self.assertEqual(job["runs-on"], "${{ fromJSON(inputs.runner-json) }}")
         self.assertEqual(job["timeout-minutes"], 10)
         checkout, install, fetch, run = job["steps"]
         self.assertFalse(checkout["with"]["persist-credentials"])

@@ -48,12 +48,35 @@ Available reusable workflows include:
   multiple variants. Scope must be nonempty and contain only letters, digits,
   dot, underscore, slash, colon, `@` or hyphen.
 - [ShellSpec](.github/workflows/reusable-shellspec.yml) uses a pinned version on
-  a GitHub-hosted runner with zsh available. The caller's `.shellspec` selects
+  a runner with zsh available; private repositories default to the `mint` pool,
+  whose runner image includes zsh. The caller's `.shellspec` selects
   the shell, for example `--shell /bin/zsh`. The workflow needs `contents: read`.
 - [Issue triage](.github/workflows/reusable-issue-triage.yml) and
   [release markers](.github/workflows/released.yml) use `actions/github-script`.
   Callers selecting self-hosted runners must use Actions runner v2.327.1 or newer.
   Issue triage needs `issues: write` (and `pull-requests: read` for the PR-sync job).
+
+### Runner selection
+
+Every reusable workflow with a `runner-json` input picks its default by
+repository visibility, so a private caller that omits `runner-json` does not
+spend GitHub-hosted minutes. Private repositories default to self-hosted
+labels (each workflow's input description lists them), and public
+repositories default to `ubuntu-latest`, because organization runners must not
+execute fork pull-request code. `github.event.repository.private` decides for
+every event that carries a repository. A `schedule` payload carries none, so
+the organization Actions variable `PRIVATE_REPO_SELF_HOSTED`, set to `true`
+with repository access limited to **Private repositories**, decides there.
+Until that variable exists, a private scheduled caller that omits
+`runner-json` still runs on `ubuntu-latest`. An explicit `runner-json` always
+wins.
+
+Persona recovery handles the CI App private key, so it never uses the shared
+pool. Private callers run on the runners named by the organization variable
+`PERSONA_RECOVERY_RUNS_ON` (`["self-hosted","persona-recovery"]`): ephemeral,
+single-use runners in the `persona-recovery` group, which only this workflow
+on `main` may use. Public callers, and every caller while the variable is
+unset, use `ubuntu-latest`.
 
 For example, a deployment workflow can publish the standard release marker:
 
