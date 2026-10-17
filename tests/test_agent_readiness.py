@@ -286,6 +286,15 @@ class TestWaiversSkipAndBlocked(Base):
         self.assertTrue(rep.blocked, "an empty ls-files must not skip as green")
         self.assertIn("returned nothing", rep.findings[0].message)
 
+    def test_crash_without_always_reads_as_blocked_not_skipped(self):
+        # A crash leaves stats empty, so the small-repo skip used to swallow it.
+        good = self.repo({"AGENTS.md": "g\n"}, {"always": False, "enforce": True})
+        with patch.object(ar, "check_docs", side_effect=RuntimeError("boom")):
+            rep = ar.audit_repo(good)
+        self.assertEqual(rep.status, "error")
+        self.assertEqual(rep.skipped, "")
+        self.assertEqual(ar.exit_code([rep], "medium", gate=True), 2)
+
     def test_inventory_counts(self):
         rep = self.audit({"AGENTS.md": "g\n", ".claude/commands/a.md": "\n", ".claude/commands/b.md": "\n",
                           ".claude/skills/s/SKILL.md": "\n", ".claude/hooks/h.sh": "\n",
