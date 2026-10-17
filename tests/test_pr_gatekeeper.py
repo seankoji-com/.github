@@ -30,6 +30,7 @@ GATE_CHECK_NAME = pr_gatekeeper.GATE_CHECK_NAME
 evaluate = pr_gatekeeper.evaluate
 
 EMPTY_STATUSES = {"state": "pending", "total_count": 0, "statuses": []}
+PASSED, FAILED, PENDING = ("completed", "success"), ("completed", "failure"), ("in_progress", None)
 
 
 def run(
@@ -415,7 +416,10 @@ class TestInvocationRefresh(unittest.TestCase):
 
         def get(path, token):
             self.reads.append(path)
-            if read_error and read_error(path, self.reads):
+            error = read_error and read_error(path, self.reads)
+            if isinstance(error, Exception):
+                raise error
+            if error:
                 raise urllib.error.URLError("fixture API failure")
             if "/pulls?state=open" in path:
                 return next(snapshots)
@@ -463,6 +467,13 @@ class TestInvocationRefresh(unittest.TestCase):
         expected += [f"/repos/demo/repo/pulls/{number}/reviews?per_page=100&page=1" for number in review_numbers]
         self.assertEqual(Counter(self.reads), Counter(expected + list(extra_reads)))
         self.assertEqual(Counter(body["head_sha"] for body in self.bodies), Counter(refs))
+
+    def assert_verdicts(self, expected):
+        # Exact (status, conclusion) per destination: GitHub also accepts
+        # neutral and skipped as a passing required check.
+        from collections import Counter
+        self.assertEqual(Counter((body["head_sha"], body["status"], body.get("conclusion")) for body in self.bodies),
+                         Counter((ref, *verdict) for ref, verdict in expected))
 
     def test_two_prs_publish_each_head_and_merge_once(self):
         prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
@@ -584,6 +595,85 @@ class TestInvocationRefresh(unittest.TestCase):
                 self.assertEqual(self.invoke([self.pr()], inventories={"head-a": inventory, "merge-a": inventory}, reviews=reviews), 0)
                 self.assert_counts(["head-a", "merge-a"], [1])
                 self.assertTrue(all(body["status"] == status and body.get("conclusion") != "success" for body in self.bodies))
+
+    def test_red_merge_inventory_blocks_approved_green_head(self):
+        reviews = {1: [TestPersonaReview().review(sha="head-a")]}
+        cases = [("failed", ([run("merge build", conclusion="failure")], EMPTY_STATUSES, []), FAILED),
+                 ("cancelled", ([run("merge build", conclusion="cancelled")], EMPTY_STATUSES, []), FAILED),
+                 ("stale", ([run("merge build", conclusion="stale")], EMPTY_STATUSES, []), FAILED),
+                 ("pending-status", ([], {"total_count": 1, "statuses": [{"context": "deploy", "state": "pending"}]}, []), PENDING)]
+        for label, merge_inventory, verdict in cases:
+            with self.subTest(label=label):
+                self.assertEqual(self.invoke([self.pr()], inventories={"merge-a": merge_inventory}, reviews=reviews), 0)
+                self.assert_counts(["head-a", "merge-a"], [1])
+                self.assert_verdicts([("head-a", verdict), ("merge-a", verdict)])
+
+    def test_merge_read_failure_after_green_head_blocks_both_refs_and_continues_other_pr(self):
+        # The head inventory was already read; the merge failure must still
+        # replace both destinations. The rejected merge SHA has no open PR
+        # branch to fall back to, so collect() re-reads the PR list once.
+        rejected = urllib.error.HTTPError("https://api.github.com/test", 422, "No commit found", {}, None)
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        self.assertEqual(self.invoke(prs, snapshots=[prs, prs, prs],
+                                     read_error=lambda path, _: "/commits/merge-a/check-runs?filter=latest" in path and rejected), 2)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2],
+                           ["/repos/demo/repo/pulls?state=open&per_page=100&page=1",
+                            "/repos/demo/repo/commits/merge-a/check-runs?filter=latest&per_page=100&page=1",
+                            "/repos/demo/repo/commits/head-a/check-runs?filter=all&per_page=100&page=1"],
+                           read_refs=["head-a", "head-b", "merge-b"])
+        self.assert_verdicts([("head-a", FAILED), ("merge-a", FAILED), ("head-b", PENDING), ("merge-b", PENDING)])
+
+    def test_rejected_stale_merge_trigger_fails_closed_without_skipping_current_prs(self):
+        rejected = urllib.error.HTTPError("https://api.github.com/test", 422, "No commit found", {}, None)
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        self.assertEqual(self.invoke(prs, "old-merge", snapshots=[prs, prs, prs],
+                                     read_error=lambda path, _: "/commits/old-merge/check-runs?filter=latest" in path and rejected), 2)
+        self.assert_counts(["old-merge", "head-a", "merge-a", "head-b", "merge-b"], [1, 2],
+                           ["/repos/demo/repo/pulls?state=open&per_page=100&page=1",
+                            "/repos/demo/repo/commits/old-merge/check-runs?filter=latest&per_page=100&page=1",
+                            "/repos/demo/repo/commits/old-merge/check-runs?filter=all&per_page=100&page=1"],
+                           read_refs=["head-a", "merge-a", "head-b", "merge-b"])
+        self.assertEqual(self.bodies[0]["head_sha"], "old-merge")
+        self.assert_verdicts([("old-merge", FAILED)] + [(ref, PENDING) for ref in ("head-a", "merge-a", "head-b", "merge-b")])
+
+    def test_merge_sha_appearing_or_disappearing_during_refresh_reevaluates_current_destinations(self):
+        for label, initial_merge, current_merge, refs in (
+                ("computed", None, "merge-a", ["head-a", "head-a", "merge-a"]),
+                ("recomputing", "merge-a", None, ["head-a", "merge-a", "head-a"])):
+            with self.subTest(label=label):
+                initial, current = [self.pr(merge=initial_merge)], [self.pr(merge=current_merge)]
+                self.assertEqual(self.invoke(initial, snapshots=[initial, current]), 0)
+                self.assert_counts(refs, [1, 1])
+                self.assert_verdicts([(ref, PENDING) for ref in refs])
+
+    def test_review_read_failure_blocks_both_refs_and_continues_other_pr(self):
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        self.assertEqual(self.invoke(prs, read_error=lambda path, _: "/pulls/1/reviews?" in path), 2)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2],
+                           ["/repos/demo/repo/commits/head-a/check-runs?filter=all&per_page=100&page=1"],
+                           read_refs=["head-b", "merge-b"])
+        self.assertEqual([body["head_sha"] for body in self.bodies], ["head-a", "merge-a", "head-b", "merge-b"])
+        self.assert_verdicts([("head-a", FAILED), ("merge-a", FAILED), ("head-b", PENDING), ("merge-b", PENDING)])
+
+    def test_trigger_pr_closed_during_refresh_is_not_reevaluated(self):
+        initial = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        self.assertEqual(self.invoke(initial, snapshots=[initial, initial[1:]]), 0)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2])
+
+    def test_approval_of_replaced_head_cannot_pass_current_head(self):
+        initial = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        current = [self.pr(1, "new-head", "new-merge"), initial[1]]
+        reviews = {1: [TestPersonaReview().review(sha="head-a")]}
+        self.assertEqual(self.invoke(initial, snapshots=[initial, current], reviews=reviews), 0)
+        self.assert_counts(["head-a", "merge-a", "new-head", "new-merge", "head-b", "merge-b"], [1, 1, 2])
+        self.assert_verdicts([("head-a", PASSED), ("merge-a", PASSED)]
+                             + [(ref, PENDING) for ref in ("new-head", "new-merge", "head-b", "merge-b")])
+
+    def test_review_signal_resolving_several_prs_evaluates_each_once(self):
+        prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
+        event = {"event": "pull_request_review", "head_sha": "merge-a", "pull_requests": [{"number": 2}]}
+        self.assertEqual(self.invoke(prs, "merge-a", extra=["--review-run", "123"], review_run=event), 0)
+        self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2], ["/repos/demo/repo/actions/runs/123"])
 
 
 class TestCommitStatuses(unittest.TestCase):
