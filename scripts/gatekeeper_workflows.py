@@ -1,7 +1,7 @@
-"""Workflow-run inventory and caller-declared required-workflow evidence.
+"""Workflow evidence collection and gate report formatting.
 
 Split out of `pr-gatekeeper.py` so the aggregator's decision logic and this
-inventory logic each stay under the size budget. The two HTTP seams it needs
+supporting logic each stay under the size budget. The two HTTP seams it needs
 (`get`, `batch_fn`) are injected by the aggregator, which keeps ownership of
 retry, authentication and monkeypatching; nothing here reads the network on its
 own or imports the aggregator back.
@@ -19,6 +19,7 @@ import urllib.parse
 
 # The gate's own caller workflow. Its run must never be inventoried or required.
 GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
+EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->"
 
 
 class WorkflowInventoryDrift(ValueError):
@@ -348,6 +349,43 @@ def evidence_label(item, name):
             and len(url) <= 2048 and not any(ord(char) < 32 for char in url)):
         return f'<a href="{html.escape(url, quote=True)}">{label}</a>'
     return label
+
+
+def finalize_report(status, conclusion, title, summary, *, refs, refs_complete,
+                    awaiting_ci, elapsed, result):
+    """Format timing and bounded recovery metadata before publishing a verdict.
+
+    Destination markers survive detail truncation. If the markers themselves
+    exceed GitHub's output budget, return a failure without claiming a complete
+    destination inventory.
+    """
+    # A delayed seed must still recognize an empty reconciliation as a seed,
+    # rather than re-evaluating it through the legacy empty-inventory path.
+    if awaiting_ci and status == "in_progress":
+        title = "Gate seeded, awaiting CI"
+        footer = "\n\n"
+    else:
+        footer = "\n\n" + EVALUATED_MARKER
+    footer += "\n<!-- gatekeeper-refs:" + json.dumps(sorted(refs)) + " -->"
+    if refs_complete:
+        footer += "\n<!-- gatekeeper-refs-complete -->"
+    summary += (f"\n\nEvaluation time: {elapsed:.2f}s. "
+                "This gate aggregates CI and configured review evidence; it does not rerun tests. "
+                "Pending work is refreshed by subsequent workflow/review events.")
+    budget = 60000 - len(footer.encode("utf-8"))
+    if budget < 0:
+        status, conclusion, title, result = "completed", "failure", "Too many gate destinations", 2
+        summary = "Gate destination metadata exceeds GitHub's output limit; operator review required."
+        # A delayed seed must still re-evaluate this failure. Do not claim the
+        # omitted destination inventory is complete.
+        summary += "\n\n" + EVALUATED_MARKER
+    else:
+        if len(summary.encode("utf-8")) > budget:
+            notice = "\n\nAdditional details omitted; inspect the repository Actions runs."
+            summary = summary.encode("utf-8")[:max(0, budget - len(notice))].decode("utf-8", errors="ignore") + notice
+            summary = summary.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        summary += footer
+    return status, conclusion, title, summary, result
 
 
 def write_job_summary(refs, status, conclusion, title, summary):

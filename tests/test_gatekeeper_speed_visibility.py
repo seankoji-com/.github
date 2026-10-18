@@ -107,6 +107,41 @@ class SpeedAndVisibilityTests(unittest.TestCase):
                                             'Blocked', 'fixture reason', False) == 0
         assert post.call_args.args[2]['conclusion'] == 'failure'
 
+    def test_final_report_preserves_verdict_seed_state_and_recovery_metadata(self):
+        for status, conclusion, awaiting_ci, seeded in (
+                ('in_progress', None, True, True),
+                ('in_progress', None, False, False),
+                ('completed', 'failure', True, False),
+                ('completed', 'success', False, False)):
+            with self.subTest(status=status, conclusion=conclusion, awaiting_ci=awaiting_ci):
+                actual = pr_gatekeeper.workflows.finalize_report(
+                    status, conclusion, 'Original title', 'Original evidence',
+                    refs={'merge', 'head'}, refs_complete=True, awaiting_ci=awaiting_ci,
+                    elapsed=1.234, result=2)
+                assert actual[:2] == (status, conclusion)
+                assert actual[2] == ('Gate seeded, awaiting CI' if seeded else 'Original title')
+                assert actual[4] == 2
+                summary = actual[3]
+                assert summary.startswith('Original evidence')
+                assert 'Evaluation time: 1.23s.' in summary
+                assert 'does not rerun tests' in summary
+                assert ('<!-- gatekeeper-evaluated -->' not in summary) == seeded
+                assert summary.endswith('<!-- gatekeeper-refs:["head", "merge"] -->\n'
+                                        '<!-- gatekeeper-refs-complete -->')
+
+    def test_final_report_truncates_multibyte_details_but_retains_incomplete_refs(self):
+        actual = pr_gatekeeper.workflows.finalize_report(
+            'completed', 'failure', 'Blocked', '\u00e9' * 60000, refs={'head'},
+            refs_complete=False, awaiting_ci=False, elapsed=0, result=0)
+        assert actual[:3] == ('completed', 'failure', 'Blocked')
+        summary = actual[3]
+        assert len(summary.encode('utf-8')) <= 60000
+        assert '\ufffd' not in summary
+        assert 'Additional details omitted' in summary
+        assert '<!-- gatekeeper-evaluated -->' in summary
+        assert summary.endswith('<!-- gatekeeper-refs:["head"] -->')
+        assert '<!-- gatekeeper-refs-complete -->' not in summary
+
     def test_distinct_workflow_ids_with_same_path_cannot_hide_failure(self):
         runs = [{'id': ident, 'workflow_id': ident, 'head_sha': 'head', 'event': 'pull_request',
                  'head_branch': 'feature', 'path': '.github/workflows/ci.yml',

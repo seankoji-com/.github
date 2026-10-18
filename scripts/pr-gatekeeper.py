@@ -79,7 +79,7 @@ PERSONA_STATE_RE = re.compile(
 DISPATCH_ALERT_MINUTES = 10
 REVIEW_ALERT_MINUTES = 120
 GATE_WORKFLOW_PATH = workflows.GATE_WORKFLOW_PATH
-EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->" 
+EVALUATED_MARKER = workflows.EVALUATED_MARKER
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
 # GitHub adds tomorrow pass silently; anything unrecognised must block.
@@ -664,32 +664,9 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         summary = f"Gate evaluation failed: {type(exc).__name__}. See the gatekeeper job log and retry."
         path = getattr(exc, "request_path", "unknown endpoint")
         print(f"::error::{title} at {path}: {exc}", file=sys.stderr)
-    # A delayed seed must still recognize an empty reconciliation as a seed,
-    # rather than re-evaluating it through the legacy empty-inventory path.
-    if awaiting_ci and status == "in_progress":
-        title = "Gate seeded, awaiting CI"
-        footer = "\n\n"
-    else:
-        footer = "\n\n" + EVALUATED_MARKER
-    footer += "\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
-    if refs_complete:
-        footer += "\n<!-- gatekeeper-refs-complete -->"
-    summary += (f"\n\nEvaluation time: {time.monotonic() - started:.2f}s. "
-                "This gate aggregates CI and configured review evidence; it does not rerun tests. "
-                "Pending work is refreshed by subsequent workflow/review events.")
-    budget = 60000 - len(footer.encode("utf-8"))
-    if budget < 0:
-        status, conclusion, title, result = "completed", "failure", "Too many gate destinations", 2
-        summary = "Gate destination metadata exceeds GitHub's output limit; operator review required."
-        # A delayed seed must still re-evaluate this failure. Do not claim the
-        # omitted destination inventory is complete.
-        summary += "\n\n" + EVALUATED_MARKER
-    else:
-        if len(summary.encode("utf-8")) > budget:
-            notice = "\n\nAdditional details omitted; inspect the repository Actions runs."
-            summary = summary.encode("utf-8")[:max(0, budget - len(notice))].decode("utf-8", errors="ignore") + notice
-            summary = summary.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
-        summary += footer
+    status, conclusion, title, summary, result = workflows.finalize_report(
+        status, conclusion, title, summary, refs=publish_refs, refs_complete=refs_complete,
+        awaiting_ci=awaiting_ci, elapsed=time.monotonic() - started, result=result)
     return publish(repo, publish_refs, token, status, conclusion, title, summary, dry_run, result)
 
 
