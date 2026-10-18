@@ -9,6 +9,8 @@ own or imports the aggregator back.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+import html
 import json
 import os
 import re
@@ -82,22 +84,18 @@ def _collect_workflow_checks(get, batch_fn, repo: str, sha: str, token: str,
     if inventory is not None:
         inventory[sha] = [run for _, run in latest.values()]
     def label(value):
-        # Inline code keeps fork-controlled paths/branches from becoming links.
-        return "`" + " ".join(str(value).split()).replace("`", "'")[:100] + "`"
+        return " ".join(str(value).split())[:100]
 
     checks = [{"id": run["id"],
-             "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); "
-                      f"[run {run['id']}](https://github.com/{repo}/actions/runs/{run['id']}). "
+             "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); run {run['id']}. "
                       "Resolve pending execution/approval or rerun unsuccessful runs"),
+             "html_url": f"https://github.com/{repo}/actions/runs/{run['id']}",
              "status": run.get("status"), "conclusion": run.get("conclusion")}
             for key, (_, run) in latest.items()]
     return checks, known_suites - selected_suites
 
 
-def collect_for_ref(get, batch_fn, repo: str, ref: str, token: str, *,
-                    workflow_sha: str | None = None,
-                    inventory: dict | None = None) -> tuple[list, dict, list]:
-    """Fetch the three payloads for a commit SHA or URL-encoded branch ref."""
+def _check_runs(get, batch_fn, repo, ref, token):
     runs: list = []
     page = 1
     while True:
@@ -111,7 +109,10 @@ def collect_for_ref(get, batch_fn, repo: str, ref: str, token: str, *,
         if len(batch) < 100:
             break
         page += 1
+    return runs
 
+
+def _statuses(get, batch_fn, repo, ref, token):
     statuses = None
     page = 1
     while True:
@@ -125,7 +126,10 @@ def collect_for_ref(get, batch_fn, repo: str, ref: str, token: str, *,
         if len(batch) < 100:
             break
         page += 1
+    return statuses
 
+
+def _suites(get, batch_fn, repo, ref, token):
     suites: list = []
     page = 1
     while True:
@@ -137,7 +141,23 @@ def collect_for_ref(get, batch_fn, repo: str, ref: str, token: str, *,
         if len(batch) < 100:
             break
         page += 1
+    return suites
 
+
+def collect_for_ref(get, batch_fn, repo: str, ref: str, token: str, *,
+                    workflow_sha: str | None = None,
+                    inventory: dict | None = None) -> tuple[list, dict, list]:
+    """Fetch the three payloads for a commit SHA or URL-encoded branch ref."""
+    # Each inventory retains its own pagination, retries and validation. Reads
+    # share no cache and all four must succeed before any verdict is published.
+    # Workflow inventory stays LAST: a rerun registered during check reads must
+    # still hold the gate pending even before it has any check runs or suites.
+    # Keep reports/publications serialized: concurrent heads can share refs.
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        checks_task = pool.submit(_check_runs, get, batch_fn, repo, ref, token)
+        status_task = pool.submit(_statuses, get, batch_fn, repo, ref, token)
+        suites_task = pool.submit(_suites, get, batch_fn, repo, ref, token)
+        runs, statuses, suites = checks_task.result(), status_task.result(), suites_task.result()
     workflow_checks, superseded_suites = collect_workflow_checks(
         get, batch_fn, repo, workflow_sha or ref, token, inventory)
     # A new workflow run on the same SHA can replace a canceled older suite.
@@ -305,3 +325,43 @@ def required_workflow_checks(get, batch_fn, repo: str, entries: list[dict], prs:
                 conclusion = "failure"
             checks.append({"name": name, "status": status, "conclusion": conclusion})
     return checks
+
+
+def safe_text(value):
+    """Render event data as text, never Markdown/HTML or hidden state markers."""
+    value = " ".join(str(value).split())[:1000]
+    return html.escape(value).replace("[", "&#91;").replace("]", "&#93;").replace("`", "&#96;")
+
+
+def evidence_label(item, name):
+    label = safe_text(name)
+    url = item.get("html_url") or item.get("target_url") or ""
+    if not isinstance(url, str):
+        return label
+    try:
+        parsed = urllib.parse.urlsplit(url)
+    except ValueError:
+        return label
+    # External app target URLs are untrusted too. GitHub is the only link host;
+    # no credentials, ports, relative URLs or executable schemes.
+    if (parsed.scheme == "https" and parsed.netloc == "github.com" and parsed.path.startswith("/")
+            and len(url) <= 2048 and not any(ord(char) < 32 for char in url)):
+        return f'<a href="{html.escape(url, quote=True)}">{label}</a>'
+    return label
+
+
+def write_job_summary(refs, status, conclusion, title, summary):
+    """Summary output is advisory; reporting failure cannot skip gate writes."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        if os.path.exists(path) and os.path.getsize(path) > 850000:
+            return
+        with open(path, "a", encoding="utf-8") as output:
+            output.write(f"### {safe_text(title)}\n\n")
+            output.write(f"{safe_text(status)} / {safe_text(conclusion or 'pending')}\n\n")
+            output.write("Destinations: " + ", ".join(safe_text(ref) for ref in sorted(refs)) + "\n\n")
+            output.write(summary + "\n\n")
+    except OSError:
+        print("::warning::Could not write gatekeeper job summary")

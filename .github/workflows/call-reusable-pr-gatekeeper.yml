@@ -5,6 +5,10 @@
 # Uses this repository's own GITHUB_TOKEN to post the check run — never an App
 # identity, so the ruleset's context match stays unambiguous.
 name: PR Gatekeeper
+run-name: >-
+  Gate refresh (${{ github.event_name }}) ·
+  ${{ github.event.workflow_run.name || (github.event_name == 'pull_request_target' && 'seed pending CI') || 'CI and review evidence' }} ·
+  ${{ github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number) || inputs.head_sha || github.event.workflow_run.head_sha }}
 
 on:
   # The wildcard is deliberate and load-bearing: `workflows` is a REQUIRED key

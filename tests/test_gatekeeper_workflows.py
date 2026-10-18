@@ -15,7 +15,7 @@ import urllib.error
 from types import SimpleNamespace
 import yaml
 
-from test_pr_gatekeeper import EMPTY_STATUSES, pr_gatekeeper
+from test_pr_gatekeeper import EMPTY_STATUSES, pr_gatekeeper, inventory_responses
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
@@ -93,8 +93,10 @@ class WorkflowInventoryTests(unittest.TestCase):
             checks, _ = pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
         name = checks[0]["name"]
         self.assertLess(len(name), 500)
-        self.assertEqual(name.count("`"), 6)
-        self.assertIn("https://github.com/org/repo/actions/runs/1", name)
+        rendered = pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[3]
+        self.assertNotIn("[unsafe]", rendered)
+        self.assertNotIn("`", rendered)
+        self.assertIn("https://github.com/org/repo/actions/runs/1", checks[0]["html_url"])
         self.assertIn("rerun unsuccessful runs", name)
 
     def test_summary_is_bounded_without_dropping_destination_markers(self):
@@ -181,10 +183,10 @@ class WorkflowInventoryTests(unittest.TestCase):
                      workflow(ident=2, check_suite_id=102)]
         gate = {"id": 10, "name": pr_gatekeeper.GATE_CHECK_NAME, "check_suite": {"id": 101},
                 "status": "in_progress", "conclusion": None}
-        with patch.object(pr_gatekeeper, "_get", side_effect=[
+        with patch.object(pr_gatekeeper, "_get", side_effect=inventory_responses([
                 {"check_runs": [gate]}, EMPTY_STATUSES,
                 {"check_suites": [{"id": 101, "status": "in_progress", "latest_check_runs_count": 1}]},
-                {"workflow_runs": workflows, "total_count": 2}]):
+                {"workflow_runs": workflows, "total_count": 2}])):
             collected = pr_gatekeeper.collect("org/repo", "head", "token")
         self.assertEqual(collected[2], [])
         self.assertEqual(pr_gatekeeper.evaluate(*collected)[:2], ("completed", "success"))
@@ -203,9 +205,9 @@ class WorkflowInventoryTests(unittest.TestCase):
                     workflows.append(workflow(ident=3, workflow_id=20, check_suite_id=103, conclusion="failure"))
                     checks.append({"id": 3, "name": "test", "check_suite": {"id": 103},
                                    "status": "completed", "conclusion": "failure"})
-                with patch.object(pr_gatekeeper, "_get", side_effect=[
+                with patch.object(pr_gatekeeper, "_get", side_effect=inventory_responses([
                         {"check_runs": checks}, EMPTY_STATUSES, {"check_suites": suites},
-                        {"workflow_runs": workflows, "total_count": len(workflows)}]):
+                        {"workflow_runs": workflows, "total_count": len(workflows)}])):
                     collected = pr_gatekeeper.collect("org/repo", "head", "token")
                 self.assertFalse(any(c.get("check_suite", {}).get("id") == 101 for c in collected[0]))
                 self.assertEqual(collected[2], [])
@@ -229,9 +231,9 @@ class WorkflowInventoryTests(unittest.TestCase):
 
     def test_report_cannot_publish_green_with_a_queued_zero_job_workflow(self):
         with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "false"}), \
-             patch.object(pr_gatekeeper, "_get", side_effect=[
+             patch.object(pr_gatekeeper, "_get", side_effect=inventory_responses([
                  {"check_runs": []}, EMPTY_STATUSES, {"check_suites": []},
-                 {"workflow_runs": [workflow(status="queued", conclusion=None)], "total_count": 1}]), \
+                 {"workflow_runs": [workflow(status="queued", conclusion=None)], "total_count": 1}])), \
              patch.object(pr_gatekeeper, "_post") as post:
             self.assertEqual(pr_gatekeeper.report("org/repo", "head", "token"), 0)
         self.assertEqual(post.call_args.args[2]["status"], "in_progress")
@@ -525,7 +527,7 @@ class RequiredWorkflowTests(unittest.TestCase):
         reads, bodies = self.reads[:], self.bodies[:]
         self.reads, self.bodies = [], []
         self.assertEqual(self.invoke("[]"), 0)
-        self.assertEqual(self.reads, reads)
+        self.assertCountEqual(self.reads, reads)
         self.assertEqual(self.bodies, bodies)
         # Plain API calls retain empty-inventory success and no PR-list read.
         self.reads, self.bodies = [], []
@@ -584,7 +586,7 @@ class RequiredWorkflowTests(unittest.TestCase):
         self.reads, self.bodies = [], []
         with patch.dict(os.environ, {"GATEKEEPER_REQUIRED_WORKFLOWS": self.manifest()}):
             self.assertEqual(self.invoke(), 0)
-        self.assertEqual(self.reads, reads)
+        self.assertCountEqual(self.reads, reads)
         self.assertEqual(self.bodies, bodies)
 
     def test_seed_then_evaluation_and_review_resolution_keep_manifest(self):

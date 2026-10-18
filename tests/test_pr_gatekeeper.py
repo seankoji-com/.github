@@ -61,6 +61,23 @@ def suite(runs_count: int, status: str = "completed", suite_id: int = 900) -> di
     }
 
 
+
+
+def inventory_responses(payloads):
+    """Route fixture pages by endpoint rather than concurrent arrival order."""
+    queues = {key: [] for key in ("check_runs", "statuses", "check_suites", "workflow_runs")}
+    for payload in payloads:
+        key = next(key for key in queues if key in payload)
+        queues[key].append(payload)
+    def get(path, token):
+        key = ("workflow_runs" if "/actions/runs?" in path else
+               "check_runs" if "/check-runs?" in path else
+               "check_suites" if "/check-suites?" in path else "statuses")
+        page = int(path.rsplit("page=", 1)[1])
+        return queues[key][page - 1]
+    return get
+
+
 class TestBlocking(unittest.TestCase):
     """The gate must catch red checks absent from a required-context list."""
 
@@ -271,31 +288,37 @@ class TestRecovery(unittest.TestCase):
     def test_status_pagination_preserves_failure_on_second_page(self):
         first = {"total_count": 101, "statuses": [{"context": str(i), "state": "success"} for i in range(100)]}
         second = {"total_count": 101, "statuses": [{"context": "late", "state": "failure"}]}
-        with patch.object(pr_gatekeeper, "_get", side_effect=[{"check_runs": []}, first, second, {"check_suites": []}, {"workflow_runs": [], "total_count": 0}]):
+        with patch.object(pr_gatekeeper, "_get", side_effect=inventory_responses([{"check_runs": []}, first, second, {"check_suites": []}, {"workflow_runs": [], "total_count": 0}])):
             runs, statuses, suites = pr_gatekeeper.collect("demo/repo", "abc", "fake")
             self.assertEqual(evaluate(runs, statuses, suites)[1], "failure")
 
     def test_sha_read_falls_back_to_matching_open_pr_branch(self):
         missing = urllib.error.HTTPError("https://api.github.com/test", 422, "missing", {}, None)
-        with patch.object(
-            pr_gatekeeper,
-            "_get",
-            side_effect=[
-                missing,
-                [{"head": {"sha": "abc", "ref": "codex/fix gate"}}],
-                {"check_runs": []},
-                EMPTY_STATUSES,
-                {"check_suites": []},
-                {"workflow_runs": [], "total_count": 0},
-            ],
-        ) as get:
+        def response(path, token):
+            if "/pulls?" in path:
+                return [{"head": {"sha": "abc", "ref": "codex/fix gate"}}]
+            if "/commits/abc/check-runs?" in path:
+                raise missing
+            if "/check-runs?" in path:
+                return {"check_runs": []}
+            if "/check-suites?" in path:
+                return {"check_suites": []}
+            if "/status?" in path:
+                return EMPTY_STATUSES
+            return {"workflow_runs": [], "total_count": 0}
+        with patch.object(pr_gatekeeper, "_get", side_effect=response) as get:
             self.assertEqual(pr_gatekeeper.collect("demo/repo", "abc", "fake"), ([], EMPTY_STATUSES, []))
-        self.assertIn("commits/codex%2Ffix%20gate/check-runs", get.call_args_list[2].args[0])
-        self.assertIn("actions/runs?head_sha=abc", get.call_args_list[-1].args[0])
+        paths = [call.args[0] for call in get.call_args_list]
+        self.assertTrue(any("commits/codex%2Ffix%20gate/check-runs" in path for path in paths))
+        self.assertTrue(any("actions/runs?head_sha=abc" in path for path in paths))
 
     def test_sha_read_raises_when_no_open_pr_matches(self):
         missing = urllib.error.HTTPError("https://api.github.com/test", 422, "missing", {}, None)
-        with patch.object(pr_gatekeeper, "_get", side_effect=[missing, []]):
+        def response(path, token):
+            if "/pulls?" in path:
+                return []
+            raise missing
+        with patch.object(pr_gatekeeper, "_get", side_effect=response):
             with self.assertRaises(urllib.error.HTTPError):
                 pr_gatekeeper.collect("demo/repo", "abc", "fake")
 
@@ -519,7 +542,9 @@ class TestInvocationRefresh(unittest.TestCase):
         prs = [self.pr(), self.pr(2, "head-b", "merge-b")]
         self.assertEqual(self.invoke(prs, read_error=lambda path, _: "/commits/head-a/check-runs?filter=latest" in path), 2)
         self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2],
-                           ["/repos/demo/repo/commits/head-a/check-runs?filter=latest&per_page=100&page=1",
+                           ["/repos/demo/repo/commits/head-a/status?per_page=100&page=1",
+                            "/repos/demo/repo/commits/head-a/check-suites?per_page=100&page=1",
+                            "/repos/demo/repo/commits/head-a/check-runs?filter=latest&per_page=100&page=1",
                             "/repos/demo/repo/commits/head-a/check-runs?filter=all&per_page=100&page=1"],
                            read_refs=["head-b", "merge-b"])
         self.assertEqual([body["head_sha"] for body in self.bodies], ["head-a", "merge-a", "head-b", "merge-b"])
@@ -628,6 +653,8 @@ class TestInvocationRefresh(unittest.TestCase):
                                      read_error=lambda path, _: "/commits/merge-a/check-runs?filter=latest" in path and rejected), 2)
         self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2],
                            ["/repos/demo/repo/pulls?state=open&per_page=100&page=1",
+                            "/repos/demo/repo/commits/merge-a/status?per_page=100&page=1",
+                            "/repos/demo/repo/commits/merge-a/check-suites?per_page=100&page=1",
                             "/repos/demo/repo/commits/merge-a/check-runs?filter=latest&per_page=100&page=1",
                             "/repos/demo/repo/commits/head-a/check-runs?filter=all&per_page=100&page=1"],
                            read_refs=["head-a", "head-b", "merge-b"])
@@ -640,6 +667,8 @@ class TestInvocationRefresh(unittest.TestCase):
                                      read_error=lambda path, _: "/commits/old-merge/check-runs?filter=latest" in path and rejected), 2)
         self.assert_counts(["old-merge", "head-a", "merge-a", "head-b", "merge-b"], [1, 2],
                            ["/repos/demo/repo/pulls?state=open&per_page=100&page=1",
+                            "/repos/demo/repo/commits/old-merge/status?per_page=100&page=1",
+                            "/repos/demo/repo/commits/old-merge/check-suites?per_page=100&page=1",
                             "/repos/demo/repo/commits/old-merge/check-runs?filter=latest&per_page=100&page=1",
                             "/repos/demo/repo/commits/old-merge/check-runs?filter=all&per_page=100&page=1"],
                            read_refs=["head-a", "merge-a", "head-b", "merge-b"])
