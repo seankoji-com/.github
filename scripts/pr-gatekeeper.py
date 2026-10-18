@@ -517,7 +517,12 @@ def publish(repo, refs, token, status, conclusion, title, summary, dry_run, resu
         try:
             _post(f"/repos/{repo}/check-runs", token, dict(body, head_sha=ref))
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            print(f"::error::could not post the gate check run for {ref}: {exc}", file=sys.stderr)
+            if isinstance(exc, urllib.error.HTTPError) and exc.code == 403:
+                print(f"::error::could not post the gate check run for {ref}: 403 Forbidden "
+                      f"(check GITHUB_TOKEN checks:write permission or fork review token restriction)",
+                      file=sys.stderr)
+            else:
+                print(f"::error::could not post the gate check run for {ref}: {exc}", file=sys.stderr)
             result = 2
     return result
 

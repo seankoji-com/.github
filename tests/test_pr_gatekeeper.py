@@ -804,6 +804,19 @@ class TestPendingOverridesTerminal(unittest.TestCase):
 
 
 class TestReviewEventContract(unittest.TestCase):
+    def test_call_reusable_review_event_contract(self):
+        import yaml
+        root = Path(__file__).resolve().parents[1]
+        caller = yaml.safe_load((root / ".github/workflows/call-reusable-review-event.yml").read_text())
+        self.assertEqual(caller["name"], "PR Review Event")
+        events = caller.get("on", caller.get(True))
+        self.assertEqual(set(events["pull_request_review"]["types"]), {"submitted", "edited", "dismissed"})
+        self.assertEqual(caller["permissions"], {"contents": "read"})
+        signal = caller["jobs"]["review-event"]
+        self.assertEqual(signal["uses"], "./.github/workflows/reusable-review-event.yml")
+        self.assertEqual(signal["permissions"], {"contents": "read"})
+        self.assertNotIn("secrets", yaml.safe_dump(caller).casefold())
+
     def test_review_events_use_a_read_only_signal_and_trusted_followup(self):
         import json
         import re
@@ -822,6 +835,7 @@ class TestReviewEventContract(unittest.TestCase):
         self.assertIn("github.event_name == 'workflow_run'", gate["if"])
         self.assertIn("github.event.workflow_run.event == 'pull_request_review'", gate["if"])
         self.assertIn("github.event_name == 'pull_request_review'", gate["if"])
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", gate["if"])
         self.assertIn("github.event.workflow_run.pull_requests[0].head.sha", gate["with"]["head_sha"])
         self.assertIn("github.event.pull_request.head.sha", gate["with"]["head_sha"])
         self.assertEqual(set(events["pull_request_target"]["types"]), {"opened", "synchronize", "reopened"})
@@ -1268,6 +1282,27 @@ class TestReviewEventResolution(unittest.TestCase):
              patch.object(pr_gatekeeper, "collect", return_value=([ci_run], EMPTY_STATUSES, [])), \
              patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], event, [review], [self.pr()]]), \
              patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "head", "--reconcile-open", "--review-run", "123"]), 0)
+            bodies = [call.args[2] for call in post.call_args_list]
+            self.assertEqual({b["head_sha"] for b in bodies}, {"head", "merge"})
+            self.assertTrue(all(b.get("conclusion") == "success" for b in bodies))
+            self.assertTrue(all(b["status"] == "completed" for b in bodies))
+            self.assertTrue(any("<!-- grumpy-review:7:completed:success -->" in b["output"]["summary"] for b in bodies))
+
+    def test_fork_review_token_403_fails_closed_with_error(self):
+        review = TestPersonaReview().review(state="APPROVED", sha="head")
+        ci_run = run("ci", status="completed", conclusion="success")
+        forbidden = urllib.error.HTTPError("https://api.github.com/repos/org/repo/check-runs", 403, "Forbidden", {}, None)
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "true"}),              patch.object(pr_gatekeeper, "collect", return_value=([ci_run], EMPTY_STATUSES, [])),              patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [review], [self.pr()]]),              patch.object(pr_gatekeeper, "_post", side_effect=forbidden):
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "head", "--reconcile-open"]), 2)
+
+    def test_fork_pr_review_event_workflow_run_followup_resolves_and_publishes_success(self):
+        fork_pr = self.pr()
+        fork_pr["head"]["repo"]["full_name"] = "fork-contributor/repo"
+        review = TestPersonaReview().review(state="APPROVED", sha="head")
+        event = {"event": "pull_request_review", "head_sha": "head", "pull_requests": [{"number": 7}]}
+        ci_run = run("ci", status="completed", conclusion="success")
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "privileged_token", "PERSONA_REVIEW_REQUIRED": "true"}),              patch.object(pr_gatekeeper, "collect", return_value=([ci_run], EMPTY_STATUSES, [])),              patch.object(pr_gatekeeper, "_get", side_effect=[[fork_pr], event, [review], [fork_pr]]),              patch.object(pr_gatekeeper, "_post") as post:
             self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "head", "--reconcile-open", "--review-run", "123"]), 0)
             bodies = [call.args[2] for call in post.call_args_list]
             self.assertEqual({b["head_sha"] for b in bodies}, {"head", "merge"})
