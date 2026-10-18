@@ -79,7 +79,7 @@ PERSONA_STATE_RE = re.compile(
 DISPATCH_ALERT_MINUTES = 10
 REVIEW_ALERT_MINUTES = 120
 GATE_WORKFLOW_PATH = workflows.GATE_WORKFLOW_PATH
-EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->" 
+EVALUATED_MARKER = workflows.EVALUATED_MARKER
 
 # Allowlist, deliberately. A denylist of failure values would let a conclusion
 # GitHub adds tomorrow pass silently; anything unrecognised must block.
@@ -141,27 +141,27 @@ def evaluate(
     }
 
     for run in dedupe_check_runs(check_runs):
-        name = run.get("name") or "(unnamed check)"
+        name = workflows.evidence_label(run, run.get("name") or "(unnamed check)")
         if run.get("status") != "completed":
-            pending.append(f"{name} ({run.get('status') or 'unknown'})")
+            pending.append(f"{name} ({workflows.safe_text(run.get('status') or 'unknown')})")
             continue
         conclusion = run.get("conclusion")
         if conclusion not in PASSING_CONCLUSIONS:
-            failing.append(f"{name} ({conclusion or 'no conclusion'})")
+            failing.append(f"{name} ({workflows.safe_text(conclusion or 'no conclusion')})")
 
     # Commit statuses. An empty response reports state "pending" — read the
     # count, not the state.
     statuses = statuses or {}
     if int(statuses.get("total_count") or 0) > 0:
         for status in statuses.get("statuses") or []:
-            context = status.get("context") or "(unnamed status)"
+            context = workflows.evidence_label(status, status.get("context") or "(unnamed status)")
             state = status.get("state")
             if state in PASSING_STATUS_STATES:
                 continue
             if state in PENDING_STATUS_STATES:
                 pending.append(f"{context} (pending)")
             else:
-                failing.append(f"{context} ({state or 'no state'})")
+                failing.append(f"{context} ({workflows.safe_text(state or 'no state')})")
 
     # Quiescence: a suite that has produced no check runs is not a suite that
     # is going to. Only suites with runs outstanding hold the gate open. The
@@ -172,8 +172,8 @@ def evaluate(
         if int(suite.get("latest_check_runs_count") or 0) <= 0:
             continue
         if suite.get("status") != "completed":
-            app = (suite.get("app") or {}).get("slug") or "unknown app"
-            pending.append(f"check suite {suite.get('id')} ({app}) not finished")
+            app = workflows.safe_text((suite.get("app") or {}).get("slug") or "unknown app")
+            pending.append(f"check suite {workflows.safe_text(suite.get('id'))} ({app}) not finished")
 
     if failing:
         title = f"{len(failing)} check{'s' if len(failing) != 1 else ''} failing"
@@ -365,7 +365,8 @@ def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | No
                        "number": pr["number"], "updated_at": pr.get("updated_at"),
                        "status": status, "conclusion": conclusion,
                        "marker": persona_marker(pr['number'], (status, conclusion)),
-                       "head_sha": pr["head"]["sha"], "merge_sha": pr.get("merge_commit_sha")})
+                       "head_sha": pr["head"]["sha"], "merge_sha": pr.get("merge_commit_sha"),
+                       "html_url": f"https://github.com/{repo}/pull/{pr['number']}#pullrequestreview"})
     return checks
 
 
@@ -526,7 +527,10 @@ def has_evaluated_gate(repo: str, sha: str, token: str) -> bool:
 
 def publish(repo, refs, token, status, conclusion, title, summary, dry_run, result=0):
     """Publish the same seed or verdict to every destination, retaining failures."""
-    print(f"{status} / {conclusion or '-'}: {title}")
+    print(f"{status} / {conclusion or '-'}: {workflows.safe_text(title)}", flush=True)
+    # Indent every line so event data cannot introduce Actions log commands.
+    print("\n".join("  " + line for line in summary.splitlines()), flush=True)
+    workflows.write_job_summary(refs, status, conclusion, title, summary)
     if dry_run:
         return 0
     body = {"name": GATE_CHECK_NAME, "status": status,
@@ -551,6 +555,10 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
            seed: bool = False, persona_state: str = "", persona_pr: int = 0,
            open_prs: list[dict] | None = None, require_ci: bool = False,
            required_workflows: str = "", workflow_metadata: dict | None = None) -> int:
+    started = time.monotonic()
+    print(f"Evaluating {workflows.safe_text(sha)}: check runs, commit statuses, "
+          "active suites, workflow runs, and configured current-head review requirements; "
+          "publishing to head and matching merge refs", flush=True)
     if seed:
         try:
             if has_evaluated_gate(repo, sha, token):
@@ -625,6 +633,9 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         if awaiting_ci:
             runs = runs + [{"name": "Awaiting CI registration", "status": "queued", "conclusion": None}]
         status, conclusion, title, summary = evaluate(runs, statuses, suites)
+        summary += (f"\n\nAggregated {len(dedupe_check_runs(runs))} check/workflow/review entries, "
+                    f"{int((statuses or {}).get('total_count') or 0)} head commit statuses, "
+                    f"and {len(suites)} head suites. Matching merge-ref verdicts are included when available.")
         if extra_summaries:
             summary += "\n\n" + "\n\n".join(extra_summaries)
         if persona_checks:
@@ -653,29 +664,9 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         summary = f"Gate evaluation failed: {type(exc).__name__}. See the gatekeeper job log and retry."
         path = getattr(exc, "request_path", "unknown endpoint")
         print(f"::error::{title} at {path}: {exc}", file=sys.stderr)
-    # A delayed seed must still recognize an empty reconciliation as a seed,
-    # rather than re-evaluating it through the legacy empty-inventory path.
-    if awaiting_ci and status == "in_progress":
-        title = "Gate seeded, awaiting CI"
-        footer = "\n\n"
-    else:
-        footer = "\n\n" + EVALUATED_MARKER
-    footer += "\n<!-- gatekeeper-refs:" + json.dumps(sorted(publish_refs)) + " -->"
-    if refs_complete:
-        footer += "\n<!-- gatekeeper-refs-complete -->"
-    budget = 60000 - len(footer.encode("utf-8"))
-    if budget < 0:
-        status, conclusion, title, result = "completed", "failure", "Too many gate destinations", 2
-        summary = "Gate destination metadata exceeds GitHub's output limit; operator review required."
-        # A delayed seed must still re-evaluate this failure. Do not claim the
-        # omitted destination inventory is complete.
-        summary += "\n\n" + EVALUATED_MARKER
-    else:
-        if len(summary.encode("utf-8")) > budget:
-            notice = "\n\nAdditional details omitted; inspect the repository Actions runs."
-            summary = summary.encode("utf-8")[:max(0, budget - len(notice))].decode("utf-8", errors="ignore") + notice
-            summary = summary.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
-        summary += footer
+    status, conclusion, title, summary, result = workflows.finalize_report(
+        status, conclusion, title, summary, refs=publish_refs, refs_complete=refs_complete,
+        awaiting_ci=awaiting_ci, elapsed=time.monotonic() - started, result=result)
     return publish(repo, publish_refs, token, status, conclusion, title, summary, dry_run, result)
 
 
