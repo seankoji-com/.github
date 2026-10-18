@@ -1,14 +1,14 @@
 # seankoji-com
 
-Public software by [Sean Carey](https://seankoji.com), a senior engineering leader who still writes code most days. The work here splits into three piles: a live consumer product, tooling for coding agents, and the small utilities that keep a one-person homelab honest. Everything is source-available to read, and most of it is one install command away from running.
+Public software by [Sean Carey](https://seankoji.com), a senior engineering leader who still writes code most days. The work here splits into three piles: a live consumer product, tooling for coding agents, and the small utilities that keep a one-person homelab honest. Tanks is a live product whose source stays private. The tools are public repositories, and most of them are one install command away from running.
 
 New here and short on time? Start with Tanks, then t3-plugins. The full catalogue, with write-ups, is at [seankoji.com/open-source](https://seankoji.com/open-source).
 
 ## Featured projects
 
-### [tanks](https://github.com/seankoji-com/tanks)
+### [Tanks](https://tanks.seankoji.com)
 
-Sydney fuel prices after your discounts, refreshed every 20 minutes from the NSW FuelCheck API, with price-cycle position, 7-Eleven fuel-lock advice and experimental 24-hour and 7-day forecasts. Live at [tanks.seankoji.com](https://tanks.seankoji.com), running on a Raspberry Pi.
+Sydney fuel prices after your discounts, refreshed every 20 minutes from the NSW FuelCheck API, with price-cycle position, 7-Eleven fuel-lock advice and experimental 24-hour and 7-day forecasts. Live at [tanks.seankoji.com](https://tanks.seankoji.com), running on a Raspberry Pi. Its source is private, so this organisation has no public Tanks repository to browse.
 
 ### [t3-plugins](https://github.com/seankoji-com/t3-plugins)
 
