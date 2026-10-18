@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""HTTP wire integration tests for scripts/pr-gatekeeper.py.
+"""HTTP wire integration tests for scripts/pr-gatekeeper.py and caller workflows.
 
 Exercises real loopback HTTP socket transport without mocking _get, _post,
 urllib, or HTTP parsing. Confirms Authorization header transmission, HTTP 403
 fail-closed handling for unprivileged tokens, and end-to-end check run
 publication on privileged workflow_run and same-repo review events.
+
+Integrates caller workflow YAML admission evaluation (.github/workflows)
+with the loopback HTTP execution to verify that job admission decisions
+and wire publication are strictly aligned.
 """
 
 from __future__ import annotations
@@ -17,16 +21,62 @@ import os
 from pathlib import Path
 import sys
 import threading
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent
+GATE_CALLER = ROOT / ".github" / "workflows" / "call-reusable-pr-gatekeeper.yml"
+REVIEW_EVENT_CALLER = ROOT / ".github" / "workflows" / "call-reusable-review-event.yml"
 
 _SPEC = importlib.util.spec_from_file_location(
     "pr_gatekeeper",
-    Path(__file__).resolve().parent.parent / "scripts" / "pr-gatekeeper.py",
+    ROOT / "scripts" / "pr-gatekeeper.py",
 )
 pr_gatekeeper = importlib.util.module_from_spec(_SPEC)
 sys.modules.setdefault("pr_gatekeeper", pr_gatekeeper)
 _SPEC.loader.exec_module(pr_gatekeeper)
+
+
+def evaluate_gatekeeper_caller_admission(
+    event_name: str,
+    repository: str,
+    head_repo_name: str,
+    workflow_run_event: str | None = None,
+    workflow_run_name: str | None = None,
+) -> bool:
+    """Evaluate jobs.gatekeeper.if in call-reusable-pr-gatekeeper.yml."""
+    caller = yaml.safe_load(GATE_CALLER.read_text())
+    gate_if = caller["jobs"]["gatekeeper"]["if"]
+    expression = (
+        " ".join(gate_if.split())
+        .replace("&&", " and ")
+        .replace("||", " or ")
+        .replace("null", "None")
+    )
+    github = SimpleNamespace(
+        event_name=event_name,
+        repository=repository,
+        event=SimpleNamespace(
+            pull_request=SimpleNamespace(
+                head=SimpleNamespace(repo=SimpleNamespace(full_name=head_repo_name))
+            ),
+            workflow_run=SimpleNamespace(
+                event=workflow_run_event,
+                name=workflow_run_name,
+                pull_requests=[{}] if workflow_run_event else [None],
+            )
+            if event_name == "workflow_run"
+            else SimpleNamespace(),
+        ),
+    )
+    context = {
+        "github": github,
+        "fromJSON": json.loads,
+        "contains": lambda values, value: value in values,
+    }
+    return bool(eval(expression, {"__builtins__": {}}, context))
 
 
 class TestReviewEventHTTPWireIntegration(unittest.TestCase):
@@ -139,6 +189,15 @@ class TestReviewEventHTTPWireIntegration(unittest.TestCase):
         self.thread.join(timeout=2)
 
     def test_fork_unprivileged_token_fails_with_403_diagnostic_over_wire(self):
+        # 1. Verify caller admission expression correctly rejects direct fork review execution
+        admitted = evaluate_gatekeeper_caller_admission(
+            event_name="pull_request_review",
+            repository="org/repo",
+            head_repo_name="fork-contributor/repo",
+        )
+        self.assertFalse(admitted, "Direct fork PR review must NOT be admitted to call-reusable-pr-gatekeeper")
+
+        # 2. Verify defense-in-depth: if unprivileged token runs anyway, 403 Forbidden is trapped over wire
         stderr = io.StringIO()
         env = {
             "GITHUB_API_URL": f"http://127.0.0.1:{self.port}",
@@ -156,6 +215,21 @@ class TestReviewEventHTTPWireIntegration(unittest.TestCase):
         self.assertEqual(post_reqs[0][2], "Bearer unprivileged_token")
 
     def test_fork_privileged_workflow_run_followup_publishes_success_over_wire(self):
+        # 1. Verify PR Review Event caller triggers on pull_request_review
+        review_caller = yaml.safe_load(REVIEW_EVENT_CALLER.read_text())
+        self.assertIn("pull_request_review", (review_caller.get("on") or review_caller.get(True)))
+
+        # 2. Verify call-reusable-pr-gatekeeper admits completion of PR Review Event via workflow_run
+        admitted = evaluate_gatekeeper_caller_admission(
+            event_name="workflow_run",
+            repository="org/repo",
+            head_repo_name="fork-contributor/repo",
+            workflow_run_event="pull_request_review",
+            workflow_run_name="PR Review Event",
+        )
+        self.assertTrue(admitted, "workflow_run follow-up for PR Review Event must be admitted")
+
+        # 3. Verify privileged follow-up evaluates persona review and publishes success over wire
         env = {
             "GITHUB_API_URL": f"http://127.0.0.1:{self.port}",
             "GITHUB_TOKEN": "privileged_token",
@@ -176,6 +250,15 @@ class TestReviewEventHTTPWireIntegration(unittest.TestCase):
         self.assertIn("<!-- grumpy-review:7:completed:success -->", body["output"]["summary"])
 
     def test_same_repo_review_event_evaluates_and_publishes_success_over_wire(self):
+        # 1. Verify direct same-repo pull_request_review is admitted
+        admitted = evaluate_gatekeeper_caller_admission(
+            event_name="pull_request_review",
+            repository="org/repo",
+            head_repo_name="org/repo",
+        )
+        self.assertTrue(admitted, "Same-repo pull_request_review must be directly admitted")
+
+        # 2. Verify direct same-repo evaluation publishes success over wire
         self.server.head_repo_name = "org/repo"
         env = {
             "GITHUB_API_URL": f"http://127.0.0.1:{self.port}",
