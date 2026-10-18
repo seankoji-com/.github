@@ -573,7 +573,7 @@ def audit_repo(root: Path, name: str | None = None, today: date | None = None) -
     report.stats = stats
     n_src = stats.get("source_files", 0)
     if n_src < int(repo.config["min_source_files"]) and not repo.config.get("always") \
-            and not report.blocked and not repo.config_error:
+            and not any(f.blocked for f in findings) and not repo.config_error:
         report.skipped = (f"{n_src} source files < {repo.config['min_source_files']} "
                           f"(set \"always\": true to scan)")
         return report
