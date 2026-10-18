@@ -155,10 +155,21 @@ def collect_for_ref(get, batch_fn, repo: str, ref: str, token: str, *,
     # still hold the gate pending even before it has any check runs or suites.
     # Keep reports/publications serialized: concurrent heads can share refs.
     with ThreadPoolExecutor(max_workers=3) as pool:
-        checks_task = pool.submit(_check_runs, get, batch_fn, repo, ref, token)
-        status_task = pool.submit(_statuses, get, batch_fn, repo, ref, token)
-        suites_task = pool.submit(_suites, get, batch_fn, repo, ref, token)
-        runs, statuses, suites = checks_task.result(), status_task.result(), suites_task.result()
+        tasks = [(name, pool.submit(reader, get, batch_fn, repo, ref, token))
+                 for name, reader in (("check-runs", _check_runs), ("statuses", _statuses), ("check-suites", _suites))]
+        results, first_error = [], None
+        for name, task in tasks:
+            try:
+                results.append(task.result())
+            except Exception as exc:
+                # Retrieve every future so simultaneous endpoint failures stay
+                # visible. Preserve the original error type for SHA fallback.
+                print(f"::warning::Gate inventory {name} failed ({type(exc).__name__})", flush=True)
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+        runs, statuses, suites = results
     workflow_checks, superseded_suites = collect_workflow_checks(
         get, batch_fn, repo, workflow_sha or ref, token, inventory)
     # A new workflow run on the same SHA can replace a canceled older suite.
@@ -278,7 +289,7 @@ def required_workflow_checks(get, batch_fn, repo: str, entries: list[dict], prs:
                 or workflow.get("path") != path or workflow.get("state") != "active"):
             raise ValueError("required workflow metadata does not identify an active matching path")
         for pr in prs or [{}]:
-            name = f"Required workflow `{path}` ({entry['event']}, {entry['ref']}, PR {pr.get('number', '?')})"
+            name = f"Required workflow {path} ({entry['event']}, {entry['ref']}, PR {pr.get('number', '?')})"
             sha = ((pr.get("head") or {}).get("sha") if entry["ref"] == "head"
                    else pr.get("merge_commit_sha"))
             candidates = [r for r in inventory.get(sha, [])

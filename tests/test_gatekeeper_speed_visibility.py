@@ -24,6 +24,32 @@ def payload(path):
 
 
 class SpeedAndVisibilityTests(unittest.TestCase):
+    def test_all_parallel_failures_are_named_and_original_exception_is_preserved(self):
+        barrier = threading.Barrier(3)
+        first = urllib.error.HTTPError('https://api.github.com/fixture', 422, 'missing', {}, None)
+        def get(path, token):
+            barrier.wait(timeout=3)
+            if '/check-runs?' in path:
+                raise first
+            raise urllib.error.URLError('fixture outage\n::error::untrusted')
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                pr_gatekeeper.workflows.collect_for_ref(get, pr_gatekeeper._batch, 'org/repo', 'head', 'token')
+        assert raised.exception is first
+        for endpoint in ('check-runs', 'statuses', 'check-suites'):
+            assert f'Gate inventory {endpoint} failed' in output.getvalue()
+        assert '::error::untrusted' not in output.getvalue()
+
+    def test_required_workflow_name_is_plain_text_after_safe_rendering(self):
+        entry = {'path': '.github/workflows/ci.yml', 'event': 'pull_request', 'ref': 'head'}
+        def get(path, token):
+            return {'id': 1, 'path': entry['path'], 'state': 'active'}
+        checks = pr_gatekeeper.workflows.required_workflow_checks(
+            get, pr_gatekeeper._batch, 'org/repo', [entry], [], {}, 'token', {})
+        summary = pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[3]
+        assert 'Required workflow .github/workflows/ci.yml' in summary
+        assert '`' not in summary and '&#96;' not in summary
+
     def test_three_inventories_overlap_then_workflow_inventory_observes_late_registration(self):
         barrier = threading.Barrier(3)
         paths, finished = [], []

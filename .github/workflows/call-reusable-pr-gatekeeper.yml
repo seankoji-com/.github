@@ -7,8 +7,10 @@
 name: PR Gatekeeper
 run-name: >-
   Gate refresh (${{ github.event_name }}) ·
-  ${{ github.event.workflow_run.name || (github.event_name == 'pull_request_target' && 'seed pending CI') || 'CI and review evidence' }} ·
-  ${{ github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number) || inputs.head_sha || github.event.workflow_run.head_sha }}
+  ${{ github.event.workflow_run.name || (github.event_name == 'pull_request_target' && 'seed pending CI') ||
+  (github.event_name == 'pull_request_review' && 'review evidence') || 'CI and review evidence' }} ·
+  ${{ (github.event.pull_request.number && format('PR #{0}', github.event.pull_request.number)) ||
+  (inputs.persona_pr && format('PR #{0}', inputs.persona_pr)) || inputs.head_sha || github.event.workflow_run.head_sha }}
 
 on:
   # The wildcard is deliberate and load-bearing: `workflows` is a REQUIRED key
