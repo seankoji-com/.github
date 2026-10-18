@@ -56,6 +56,11 @@ import gatekeeper_workflows as workflows
 
 API = "https://api.github.com"
 
+
+def api_base() -> str:
+    return os.getenv("GITHUB_API_URL", API).rstrip("/")
+
+
 # The check-run name, verbatim. The org ruleset matches this string exactly;
 # any variation here is an unsatisfiable required context on 33 repos.
 GATE_CHECK_NAME = "gatekeeper / all-checks-passed"
@@ -216,7 +221,7 @@ def _request_json(req: urllib.request.Request) -> object:
 
 def _get(path: str, token: str) -> object:
     req = urllib.request.Request(
-        f"{API}{path}",
+        f"{api_base()}{path}",
         headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -233,7 +238,7 @@ def _get(path: str, token: str) -> object:
 
 def _post(path: str, token: str, body: dict) -> object:
     req = urllib.request.Request(
-        f"{API}{path}",
+        f"{api_base()}{path}",
         data=json.dumps(body).encode(),
         method="POST",
         headers={
