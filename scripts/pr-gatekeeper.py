@@ -437,8 +437,23 @@ def persona_progress(checks: list[dict], prior_runs: list[dict],
     return descriptions
 
 
+class StaleReviewSignal(ValueError):
+    """A review signal that matched no open PR.
+
+    A review event can sit in the workflow_run queue long enough for its PR to
+    close or merge first, so the signal then belongs to no open PR and there is
+    nothing left to publish. Subclasses ValueError so the paths that cannot
+    rely on a follow-up sweep keep failing closed on it.
+    """
+
+
 def resolve_review_heads(repo: str, run_id: int, token: str, open_prs: list[dict] | None = None) -> list[str]:
-    """Resolve fork review signals using trusted GitHub run and PR metadata."""
+    """Resolve fork review signals using trusted GitHub run and PR metadata.
+
+    Raises StaleReviewSignal when the signal matches no open PR. An unreadable
+    run or PR list still raises its own error, so unreadable check state keeps
+    failing closed instead of being mistaken for a stale signal.
+    """
     run = _get(f"/repos/{repo}/actions/runs/{run_id}", token)
     if run.get("event") != "pull_request_review":
         raise ValueError("not a review event workflow run")
@@ -453,7 +468,7 @@ def resolve_review_heads(repo: str, run_id: int, token: str, open_prs: list[dict
         if pr["number"] in linked or same_branch or same_commit:
             heads.add(head["sha"])
     if not heads:
-        raise ValueError("could not associate review event with an open PR")
+        raise StaleReviewSignal("could not associate review event with an open PR")
     return sorted(heads)
 
 
@@ -696,7 +711,16 @@ def reconcile_open(repo: str, token: str, dry_run: bool, sha: str | None = None,
     if sha:
         try:
             prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
-            heads = resolve_review_heads(repo, review_run, token, prs) if review_run else [sha]
+            try:
+                heads = resolve_review_heads(repo, review_run, token, prs) if review_run else [sha]
+            except StaleReviewSignal as exc:
+                # The reviewed PR closed or merged while its review event sat in
+                # the queue. Nothing is left to publish for the signal, and the
+                # sweep below still evaluates every open PR, so a stale signal
+                # cannot suppress a gate. A read failure is not this case; it
+                # propagates to the blocking fallback instead.
+                print(f"::notice::{exc}; signal is stale, reconciling open PRs only", file=sys.stderr)
+                heads = []
             for head in heads:
                 refresh(head, prs, signal=True)
         except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
