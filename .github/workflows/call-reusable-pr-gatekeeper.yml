@@ -114,9 +114,15 @@ jobs:
     #     would burn workflow_run's three-level chain cap.
     #   - `pull_requests` is empty on fork runs, so the event allowlist is what
     #     keeps fork PRs gated rather than ignored.
+    #   - pull_request_review evaluates directly for same-repo PRs when a persona
+    #     bot or maintainer submits, edits, or dismisses a review. Fork PR reviews
+    #     have read-only tokens and cannot write checks; they evaluate via the
+    #     privileged workflow_run route.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'pull_request_target' ||
+      (github.event_name == 'pull_request_review' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'workflow_run' &&
        (github.event.workflow_run.name != 'PR Gatekeeper' ||
         github.event.workflow_run.event == 'pull_request_review') &&

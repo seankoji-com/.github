@@ -1,0 +1,22 @@
+# PR Review Event — synced from seankoji-com/.github (.github/workflows/call-reusable-review-event.yml)
+# Fork PR reviews run with a read-only GITHUB_TOKEN and cannot post check-runs.
+# This signal workflow finishes without checking out PR code; workflow_run then
+# triggers PR Gatekeeper on the default branch to evaluate and publish with checks: write.
+name: PR Review Event
+
+on:
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-review-event-${{ github.repository }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-event:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/reusable-review-event.yml
