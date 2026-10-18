@@ -1,6 +1,6 @@
 # Hosted Validation Runbook: Gatekeeper Review Event & Stuck Check Verification
 
-This runbook documents the step-by-step verification procedure for validating the PR Gatekeeper fix on hosted GitHub Actions infrastructure.
+This runbook documents the step-by-step verification procedure for validating the PR Gatekeeper fix on hosted GitHub Actions infrastructure during authorized hosted acceptance testing.
 
 ## Context & Problem Statement
 
@@ -20,8 +20,9 @@ The fix introduces:
 1. **Create a Test PR from a local branch**:
    ```bash
    git checkout -b test/verify-review-approval
-   echo "test verification" >> test-trigger.txt
-   git commit -am "test: trigger gatekeeper review validation"
+   echo "test verification" > test-trigger.txt
+   git add test-trigger.txt
+   git commit -m "test: trigger gatekeeper review validation"
    git push origin test/verify-review-approval
    gh pr create --title "Test Gatekeeper Review Approval" --body "Testing gatekeeper review completion"
    ```
@@ -48,21 +49,40 @@ The fix introduces:
      ```
    - **Expected Outcome**: `gatekeeper / all-checks-passed` is `completed: success` without manual rerun.
 
+4. **Cleanup**:
+   ```bash
+   gh pr close <PR_NUMBER> --delete-branch
+   ```
+
 ---
 
 ### Test Case 2: Fork PR Review Event (Privileged Follow-up Route)
 
-1. **Submit Review on a Fork PR**:
-   - Have `bot-grumpy-engineer` submit an approval on a PR created from a fork repository.
+1. **Submit a Fork PR**:
+   From a fork clone or branch:
+   ```bash
+   git checkout -b test/verify-fork-review-approval
+   echo "fork test verification" > test-trigger.txt
+   git add test-trigger.txt
+   git commit -m "test: trigger gatekeeper fork review validation"
+   git push origin test/verify-fork-review-approval
+   gh pr create --head <fork-owner>:test/verify-fork-review-approval --title "Test Fork Gatekeeper Review Approval" --body "Testing fork gatekeeper review completion"
+   ```
 
-2. **Verify Signal Workflow Run**:
+2. **Submit Review on the Fork PR**:
+   - Have `bot-grumpy-engineer` submit an approval on the fork PR:
+     ```bash
+     gh pr review <FORK_PR_NUMBER> --approve -b "LGTM: persona approval on fork"
+     ```
+
+3. **Verify Signal Workflow Run**:
    - Confirm `PR Review Event` (`call-reusable-review-event.yml`) triggers on `pull_request_review`:
      ```bash
      gh run list --workflow "PR Review Event"
      ```
    - Verify it finishes cleanly (`status: completed, conclusion: success`).
 
-3. **Verify Automatic Downstream Gatekeeper Run**:
+4. **Verify Automatic Downstream Gatekeeper Run**:
    - Confirm `PR Gatekeeper` (`call-reusable-pr-gatekeeper.yml`) triggers automatically via `workflow_run`:
      ```bash
      gh run list --workflow "PR Gatekeeper" --event workflow_run
@@ -70,9 +90,14 @@ The fix introduces:
    - Check the run logs to verify it resolved the review event via `--review-run <SIGNAL_RUN_ID>`.
    - Confirm check-run status:
      ```bash
-     gh pr checks <PR_NUMBER>
+     gh pr checks <FORK_PR_NUMBER>
      ```
-   - **Expected Outcome**: `gatekeeper / all-checks-passed` check run publishes `completed: success`.
+   - **Expected Outcome**: `gatekeeper / all-checks-passed` check run publishes `completed: success` without manual rerun.
+
+5. **Cleanup**:
+   ```bash
+   gh pr close <FORK_PR_NUMBER> --delete-branch
+   ```
 
 ---
 
