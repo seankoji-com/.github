@@ -552,14 +552,24 @@ class TestInvocationRefresh(unittest.TestCase):
         self.assertEqual(self.invoke(prs, "old-merge", extra=["--review-run", "123"], review_run=event), 0)
         self.assert_counts(["head-a", "merge-a", "head-b", "merge-b"], [1, 2], ["/repos/demo/repo/actions/runs/123"])
 
-    def test_unassociated_fork_signal_retains_failure_and_refresh(self):
+    def test_stale_fork_signal_reconciles_open_prs_without_pinning_main_red(self):
+        # A review event that queued behind a merge resolves to no open PR.
+        # That is stale, not unreadable: publish nothing for the signal, keep
+        # the run green, and still refresh every open PR.
         prs = [self.pr()]
         event = {"event": "pull_request_review", "head_sha": "unrelated", "pull_requests": []}
-        self.assertEqual(self.invoke(prs, "old-merge", extra=["--review-run", "123"], review_run=event), 2)
-        self.assert_counts(["old-merge", "head-a", "merge-a"], [1],
-                           ["/repos/demo/repo/actions/runs/123",
-                            "/repos/demo/repo/commits/old-merge/check-runs?filter=all&per_page=100&page=1"],
-                           read_refs=["head-a", "merge-a"])
+        self.assertEqual(self.invoke(prs, "old-merge", extra=["--review-run", "123"], review_run=event), 0)
+        self.assert_counts(["head-a", "merge-a"], [1], ["/repos/demo/repo/actions/runs/123"])
+        self.assertEqual([body["head_sha"] for body in self.bodies], ["head-a", "merge-a"])
+
+    def test_unreadable_pr_list_during_review_signal_still_pins_blocking_fallback(self):
+        # Only a resolved zero-head signal is stale. A PR list that cannot be
+        # read is unreadable state and must keep failing closed on the fallback.
+        prs = [self.pr()]
+        event = {"event": "pull_request_review", "head_sha": "unrelated", "pull_requests": []}
+        self.assertEqual(self.invoke(prs, "old-merge", extra=["--review-run", "123"], review_run=event,
+                                     read_error=lambda path, reads: "/pulls?state=open" in path
+                                     and len(reads) == 1), 2)
         self.assertEqual([body["head_sha"] for body in self.bodies], ["old-merge", "head-a", "merge-a"])
         self.assertEqual(self.bodies[0]["conclusion"], "failure")
 
@@ -1189,6 +1199,26 @@ class TestReviewEventResolution(unittest.TestCase):
             self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "merge", "--review-run", "123"]), 2)
             self.assertEqual(post.call_args.args[2]["head_sha"], "merge")
             self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+
+    def test_stale_signal_stays_fail_closed_without_a_reconcile_sweep(self):
+        # Without --reconcile-open nothing else publishes for this run, so a
+        # stale signal must keep producing the blocking fallback rather than
+        # exiting 0 with no check posted.
+        stale = pr_gatekeeper.StaleReviewSignal("could not associate review event with an open PR")
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
+             patch.object(pr_gatekeeper, "resolve_review_heads", side_effect=stale), \
+             patch.object(pr_gatekeeper, "previous_publication_refs", return_value=set()), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "merge", "--review-run", "123"]), 2)
+            self.assertEqual(post.call_args.args[2]["head_sha"], "merge")
+            self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+
+    def test_unreadable_open_pr_list_is_not_reported_as_a_stale_signal(self):
+        event = {"event": "pull_request_review", "head_sha": "merge", "pull_requests": []}
+        with patch.object(pr_gatekeeper, "_get",
+                          side_effect=[event, urllib.error.URLError("fixture API failure")]):
+            with self.assertRaises(urllib.error.URLError):
+                pr_gatekeeper.resolve_review_heads("org/repo", 123, "token")
 
     def test_approval_and_dismissal_update_both_refs_using_actual_head(self):
         for state, expected in (("APPROVED", "success"), ("DISMISSED", None)):

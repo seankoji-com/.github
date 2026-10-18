@@ -129,3 +129,16 @@ The bug was directly observed and recorded on hosted GitHub Actions in PR #54 (`
 If unexpected behavior occurs:
 - The gatekeeper job admission condition can be inspected in `.github/workflows/call-reusable-pr-gatekeeper.yml`.
 - Standard manual rerun (`gh run rerun <RUN_ID>`) continues to operate as an emergency fallback.
+
+### Stale review signals
+
+A `pull_request_review` event can queue behind a merge and run after its PR has
+closed. `resolve_review_heads` then matches no open PR and raises
+`StaleReviewSignal`. On the `--reconcile-open` path — which every caller in this
+organization passes — that is a no-op: the run logs `::notice::could not
+associate review event with an open PR; signal is stale, reconciling open PRs
+only`, publishes nothing for the signal, still refreshes every open PR, and
+exits 0 without pinning `main` red.
+
+An unreadable run or PR list is not a stale signal. It keeps failing closed and
+publishes the blocking fallback, as it always has.
