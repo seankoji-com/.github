@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 import urllib.error
 
+from types import SimpleNamespace
 import yaml
 
 from test_pr_gatekeeper import EMPTY_STATUSES, pr_gatekeeper
@@ -807,6 +808,7 @@ class CoalescedRefreshTests(unittest.TestCase):
             ("workflow_run", "pull_request", "PR Gatekeeper", True, False),
             ("workflow_run", "pull_request_review", "PR Gatekeeper", True, False),
             ("pull_request_target", "", "", False, False),
+            ("pull_request_review", "", "", False, False),
             ("workflow_dispatch", "", "", False, False),
         ]
         for visibility in ("public",):
@@ -825,6 +827,42 @@ class CoalescedRefreshTests(unittest.TestCase):
                     })
                     expected = "pr-gatekeeper-refresh-org/repo" if coalesces else "pr-gatekeeper-event-42"
                     self.assertEqual(actual, expected)
+
+
+    def test_gatekeeper_job_admission_condition(self):
+        caller = yaml.safe_load(GATE_CALLER.read_text())
+        gate_if = caller["jobs"]["gatekeeper"]["if"].strip()
+        expression = gate_if.replace("&&", " and ").replace("||", " or ").replace("null", "None")
+        cases = [
+            ("pull_request_review", "", "", False, True),
+            ("workflow_dispatch", "", "", False, True),
+            ("pull_request_target", "", "", False, True),
+            ("workflow_run", "pull_request_review", "Review Signal", False, True),
+            ("workflow_run", "pull_request_review", "PR Gatekeeper", False, True),
+            ("workflow_run", "pull_request", "CI", True, True),
+            ("workflow_run", "pull_request", "CI", False, True),
+            ("workflow_run", "dynamic", "CI", False, True),
+            ("workflow_run", "pull_request_target", "CI", False, True),
+            ("workflow_run", "pull_request", "PR Gatekeeper", True, False),
+            ("workflow_run", "schedule", "Maintenance", False, False),
+            ("workflow_run", "push", "CI", False, False),
+        ]
+        for event, upstream, name, attached, admitted in cases:
+            with self.subTest(event=event, upstream=upstream, name=name, attached=attached):
+                github = SimpleNamespace(
+                    event_name=event, repository="org/repo", run_id="42",
+                    event=SimpleNamespace(workflow_run=SimpleNamespace(
+                        event=upstream, name=name,
+                        pull_requests=[{}] if attached else [None]
+                    ) if event == "workflow_run" else SimpleNamespace())
+                )
+                context = {
+                    "github": github,
+                    "fromJSON": json.loads,
+                    "contains": lambda values, value: value in values,
+                }
+                actual = bool(eval(expression, {"__builtins__": {}}, context))
+                self.assertEqual(actual, admitted)
 
 
 FIXTURE_CURL = r'''#!/bin/sh

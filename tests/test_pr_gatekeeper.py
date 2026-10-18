@@ -821,7 +821,9 @@ class TestReviewEventContract(unittest.TestCase):
         gate = caller["jobs"]["gatekeeper"]
         self.assertIn("github.event_name == 'workflow_run'", gate["if"])
         self.assertIn("github.event.workflow_run.event == 'pull_request_review'", gate["if"])
+        self.assertIn("github.event_name == 'pull_request_review'", gate["if"])
         self.assertIn("github.event.workflow_run.pull_requests[0].head.sha", gate["with"]["head_sha"])
+        self.assertIn("github.event.pull_request.head.sha", gate["with"]["head_sha"])
         self.assertEqual(set(events["pull_request_target"]["types"]), {"opened", "synchronize", "reopened"})
         self.assertIn("github.event_name == 'pull_request_target'", gate["if"])
         self.assertEqual(gate["with"]["seed"], "${{ github.event_name == 'pull_request_target' }}")
@@ -1229,6 +1231,49 @@ class TestReviewEventResolution(unittest.TestCase):
             self.assertEqual(pr_gatekeeper.report("org/repo", head, "token"), 2)
             self.assertEqual({c.args[2]["head_sha"] for c in post.call_args_list}, {head, merge})
             self.assertTrue(all(c.args[2]["conclusion"] == "failure" for c in post.call_args_list))
+
+    def test_direct_review_event_approval_evaluates_and_publishes_success(self):
+        review = TestPersonaReview().review(state="APPROVED", sha="head")
+        ci_run = run("ci", status="completed", conclusion="success")
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([ci_run], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [review], [self.pr()]]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "head", "--reconcile-open"]), 0)
+            bodies = [call.args[2] for call in post.call_args_list]
+            self.assertEqual({b["head_sha"] for b in bodies}, {"head", "merge"})
+            self.assertTrue(all(b.get("conclusion") == "success" for b in bodies))
+            self.assertTrue(all(b["status"] == "completed" for b in bodies))
+            self.assertTrue(any("<!-- grumpy-review:7:completed:success -->" in b["output"]["summary"] for b in bodies))
+
+    def test_direct_review_event_changes_requested_publishes_failure(self):
+        review = TestPersonaReview().review(state="CHANGES_REQUESTED", sha="head")
+        ci_run = run("ci", status="completed", conclusion="success")
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([ci_run], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], [review], [self.pr()]]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "head", "--reconcile-open"]), 0)
+            bodies = [call.args[2] for call in post.call_args_list]
+            self.assertEqual({b["head_sha"] for b in bodies}, {"head", "merge"})
+            self.assertTrue(all(b.get("conclusion") == "failure" for b in bodies))
+            self.assertTrue(all(b["status"] == "completed" for b in bodies))
+            self.assertTrue(any("<!-- grumpy-review:7:completed:failure -->" in b["output"]["summary"] for b in bodies))
+
+    def test_review_event_workflow_run_followup_resolves_and_publishes_success(self):
+        review = TestPersonaReview().review(state="APPROVED", sha="head")
+        event = {"event": "pull_request_review", "head_sha": "head", "pull_requests": [{"number": 7}]}
+        ci_run = run("ci", status="completed", conclusion="success")
+        with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake", "PERSONA_REVIEW_REQUIRED": "true"}), \
+             patch.object(pr_gatekeeper, "collect", return_value=([ci_run], EMPTY_STATUSES, [])), \
+             patch.object(pr_gatekeeper, "_get", side_effect=[[self.pr()], event, [review], [self.pr()]]), \
+             patch.object(pr_gatekeeper, "_post") as post:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "head", "--reconcile-open", "--review-run", "123"]), 0)
+            bodies = [call.args[2] for call in post.call_args_list]
+            self.assertEqual({b["head_sha"] for b in bodies}, {"head", "merge"})
+            self.assertTrue(all(b.get("conclusion") == "success" for b in bodies))
+            self.assertTrue(all(b["status"] == "completed" for b in bodies))
+            self.assertTrue(any("<!-- grumpy-review:7:completed:success -->" in b["output"]["summary"] for b in bodies))
 
     def test_overlapping_publications_share_one_repository_queue(self):
         import yaml
