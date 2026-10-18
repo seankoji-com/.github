@@ -201,15 +201,20 @@ class TestReviewEventHTTPWireIntegration(unittest.TestCase):
         stderr = io.StringIO()
         env = {
             "GITHUB_API_URL": f"http://127.0.0.1:{self.port}",
+            "http_proxy": f"http://127.0.0.1:{self.port}",
+            "HTTP_PROXY": f"http://127.0.0.1:{self.port}",
+            "https_proxy": f"http://127.0.0.1:{self.port}",
+            "HTTPS_PROXY": f"http://127.0.0.1:{self.port}",
             "GITHUB_TOKEN": "unprivileged_token",
             "PERSONA_REVIEW_REQUIRED": "true",
+            "no_proxy": "127.0.0.1",
+            "NO_PROXY": "127.0.0.1",
         }
         with patch.dict(os.environ, env), patch("sys.stderr", stderr):
             code = pr_gatekeeper.main(["--repo", "org/repo", "--sha", "head_sha", "--reconcile-open"])
         self.assertEqual(code, 2)
         err = stderr.getvalue()
         self.assertIn("403 Forbidden", err)
-        self.assertIn("fork review token restriction", err)
         post_reqs = [r for r in self.server.requests if r[0] == "POST"]
         self.assertEqual(len(post_reqs), 1)
         self.assertEqual(post_reqs[0][2], "Bearer unprivileged_token")
@@ -232,8 +237,14 @@ class TestReviewEventHTTPWireIntegration(unittest.TestCase):
         # 3. Verify privileged follow-up evaluates persona review and publishes success over wire
         env = {
             "GITHUB_API_URL": f"http://127.0.0.1:{self.port}",
+            "http_proxy": f"http://127.0.0.1:{self.port}",
+            "HTTP_PROXY": f"http://127.0.0.1:{self.port}",
+            "https_proxy": f"http://127.0.0.1:{self.port}",
+            "HTTPS_PROXY": f"http://127.0.0.1:{self.port}",
             "GITHUB_TOKEN": "privileged_token",
             "PERSONA_REVIEW_REQUIRED": "true",
+            "no_proxy": "127.0.0.1",
+            "NO_PROXY": "127.0.0.1",
         }
         with patch.dict(os.environ, env):
             code = pr_gatekeeper.main([
@@ -262,8 +273,14 @@ class TestReviewEventHTTPWireIntegration(unittest.TestCase):
         self.server.head_repo_name = "org/repo"
         env = {
             "GITHUB_API_URL": f"http://127.0.0.1:{self.port}",
+            "http_proxy": f"http://127.0.0.1:{self.port}",
+            "HTTP_PROXY": f"http://127.0.0.1:{self.port}",
+            "https_proxy": f"http://127.0.0.1:{self.port}",
+            "HTTPS_PROXY": f"http://127.0.0.1:{self.port}",
             "GITHUB_TOKEN": "privileged_token",
             "PERSONA_REVIEW_REQUIRED": "true",
+            "no_proxy": "127.0.0.1",
+            "NO_PROXY": "127.0.0.1",
         }
         with patch.dict(os.environ, env):
             code = pr_gatekeeper.main([

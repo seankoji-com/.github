@@ -4,7 +4,7 @@ This runbook documents the step-by-step verification procedure for validating th
 
 ## Context & Problem Statement
 
-Prior to this fix, when persona bots (such as `bot-grumpy-engineer`) submitted an approval on a PR, the review signal would fire, but the gatekeeper run skipped execution, leaving the required check `gatekeeper / all-checks-passed` in the `in_progress` state indefinitely until manually rerun.
+Before this fix, `jobs.gatekeeper.if` admitted only `workflow_dispatch`, `pull_request_target`, and qualifying `workflow_run` events. A direct `pull_request_review` event was absent from that allowlist, so its gatekeeper job skipped and the required check `gatekeeper / all-checks-passed` remained `in_progress`.
 
 The fix introduces:
 1. **Direct Admission for Same-Repository PRs**: Direct `pull_request_review` events on same-repo PRs evaluate and publish check-runs immediately with `checks: write` runner permissions.
@@ -20,13 +20,13 @@ The bug was directly observed and recorded on hosted GitHub Actions in PR #54 (`
 - **Event & Workflow Run**: Run [39085362103](https://github.com/seankoji-com/.github/actions/runs/39085362103)
   - Triggered via: `pull_request_review` at `2026-10-18T01:08:09Z` upon persona bot review submission.
   - Job `review-event / signal`: `SUCCESS` (ID 117550641169).
-  - Job `gatekeeper`: `SKIPPED` (ID 117550642307) because `jobs.gatekeeper.if` did not admit `pull_request_review`.
+  - Job `gatekeeper`: `SKIPPED` (ID 117550642307) because the job-level event allowlist did not include direct `pull_request_review` events.
 - **Downstream Blockage**:
   - Because the workflow is named `PR Gatekeeper`, GitHub Actions prohibited `workflow_run` from triggering another run of `PR Gatekeeper`.
   - No automated follow-up run was created at `01:08:09Z`.
   - The required check `gatekeeper / all-checks-passed` was left stuck `in_progress` indefinitely.
-- **Resolution via Manual Rerun**:
-  - At `2026-10-18T01:37:49Z`, manual rerun of run [39027991584](https://github.com/seankoji-com/.github/actions/runs/39027991584) finally published `gatekeeper / all-checks-passed: SUCCESS` (Job ID 117556095148).
+- **Later Successful Gate Run**:
+  - At `2026-10-18T01:37:49Z`, separate run [39027991584](https://github.com/seankoji-com/.github/actions/runs/39027991584) published `gatekeeper / all-checks-passed: SUCCESS` (Job ID 117556095148).
 
 ### Architectural Solution
 - **Same-Repo PRs**: Admitted directly in `call-reusable-pr-gatekeeper.yml` under `github.event.pull_request.head.repo.full_name == github.repository`. Bypasses `workflow_run` entirely, avoiding both runner delay and self-trigger prohibition.
@@ -80,7 +80,7 @@ The bug was directly observed and recorded on hosted GitHub Actions in PR #54 (`
 ### Test Case 2: Fork PR Review Event (Privileged Follow-up Route)
 
 1. **Submit a Fork PR**:
-   From a fork clone or branch:
+   From a clone of your fork, make sure `origin` points to that fork. If you cloned the base repository, set `origin` to your fork URL before running these commands. Then run:
    ```bash
    git checkout -b test/verify-fork-review-approval
    echo "fork test verification" > test-trigger.txt
@@ -116,8 +116,10 @@ The bug was directly observed and recorded on hosted GitHub Actions in PR #54 (`
    - **Expected Outcome**: `gatekeeper / all-checks-passed` check run publishes `completed: success` without manual rerun.
 
 5. **Cleanup**:
+   Close the PR in the base repository, then delete the branch from your fork:
    ```bash
-   gh pr close <FORK_PR_NUMBER> --delete-branch
+   gh pr close <FORK_PR_NUMBER> --repo <base-owner>/<base-repo>
+   git push origin --delete test/verify-fork-review-approval
    ```
 
 ---
