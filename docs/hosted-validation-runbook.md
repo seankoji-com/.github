@@ -1,6 +1,6 @@
 # Hosted Validation Runbook: Gatekeeper Review Event & Stuck Check Verification
 
-This runbook documents the step-by-step verification procedure for validating the PR Gatekeeper fix on hosted GitHub Actions infrastructure during authorized hosted acceptance testing.
+This runbook documents the step-by-step verification procedure for validating the PR Gatekeeper fix on hosted GitHub Actions infrastructure during authorized hosted acceptance testing, alongside the historical hosted incident evidence from PR #54.
 
 ## Context & Problem Statement
 
@@ -10,6 +10,27 @@ The fix introduces:
 1. **Direct Admission for Same-Repository PRs**: Direct `pull_request_review` events on same-repo PRs evaluate and publish check-runs immediately with `checks: write` runner permissions.
 2. **Privileged `workflow_run` Route for Fork PRs**: Fork PR reviews run with read-only tokens (`checks: read`). They trigger the unprivileged signal workflow `call-reusable-review-event.yml`, whose completion automatically triggers `call-reusable-pr-gatekeeper.yml` on `main` via `workflow_run` with privileged `checks: write` tokens.
 3. **Explicit 403 Diagnostics**: If an unprivileged token attempts publication, `scripts/pr-gatekeeper.py` outputs a clear diagnostic indicating fork review token restrictions.
+
+---
+
+## Historical Incident Trace & Root Cause Evidence (PR #54)
+
+The bug was directly observed and recorded on hosted GitHub Actions in PR #54 (`test(gatekeeper): cover remaining refresh edge cases from #49`):
+
+- **Event & Workflow Run**: Run [39085362103](https://github.com/seankoji-com/.github/actions/runs/39085362103)
+  - Triggered via: `pull_request_review` at `2026-10-18T01:08:09Z` upon persona bot review submission.
+  - Job `review-event / signal`: `SUCCESS` (ID 117550641169).
+  - Job `gatekeeper`: `SKIPPED` (ID 117550642307) because `jobs.gatekeeper.if` did not admit `pull_request_review`.
+- **Downstream Blockage**:
+  - Because the workflow is named `PR Gatekeeper`, GitHub Actions prohibited `workflow_run` from triggering another run of `PR Gatekeeper`.
+  - No automated follow-up run was created at `01:08:09Z`.
+  - The required check `gatekeeper / all-checks-passed` was left stuck `in_progress` indefinitely.
+- **Resolution via Manual Rerun**:
+  - At `2026-10-18T01:37:49Z`, manual rerun of run [39027991584](https://github.com/seankoji-com/.github/actions/runs/39027991584) finally published `gatekeeper / all-checks-passed: SUCCESS` (Job ID 117556095148).
+
+### Architectural Solution
+- **Same-Repo PRs**: Admitted directly in `call-reusable-pr-gatekeeper.yml` under `github.event.pull_request.head.repo.full_name == github.repository`. Bypasses `workflow_run` entirely, avoiding both runner delay and self-trigger prohibition.
+- **Fork PRs**: Emitted by caller workflow `call-reusable-review-event.yml` (`PR Review Event`). Cross-workflow triggers (`PR Review Event` -> `PR Gatekeeper`) are fully permitted by GitHub Actions, allowing the privileged runner on `main` to publish check runs.
 
 ---
 
