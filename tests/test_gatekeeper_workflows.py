@@ -392,6 +392,17 @@ class RequiredWorkflowTests(unittest.TestCase):
                 self.assertEqual(self.invoke(self.manifest()), 0)
                 self.assert_gate(("in_progress", None))
 
+    def test_run_on_previous_merge_commit_cannot_satisfy_merge_binding(self):
+        # The API lists a run recorded against the PR's earlier merge commit
+        # under the current merge SHA; only the current merge SHA may count.
+        stale = self.required_run("old-merge")
+        self.install(stale)
+        self.inventories = {"merge": [stale]}
+        self.assertEqual(self.invoke(self.manifest("merge"), reconcile=True), 0)
+        self.assert_gate(("in_progress", None))
+        self.assertIn("missing current-ref run", self.bodies[0]["output"]["summary"])
+        self.assertFalse(any("/attempts/" in p for p in self.reads))
+
     def test_fork_empty_association_and_path_revision_suffix_use_exact_identity(self):
         self.install(self.required_run(pull_requests=[], path=".github/workflows/test.yml@feature"))
         self.assertEqual(self.invoke(self.manifest()), 0)
