@@ -39,6 +39,7 @@ jobs:
     # of the step-level warnings run. The private controller's scheduled
     # sweep (every 15 minutes) can dispatch missing reviews independently,
     # subject to active-run/retry limits and available self-hosted capacity.
+    if: ${{ vars.PERSONA_RECOVERY_RUNS_ON == '["self-hosted","persona-recovery"]' }}
     runs-on: ${{ vars.PERSONA_RECOVERY_RUNS_ON == '["self-hosted","persona-recovery"]' && fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }} # runner-keep-hosted (fallback while PERSONA_RECOVERY_RUNS_ON is unset/invalid; App private-key isolation)
     timeout-minutes: 10
     permissions:
@@ -132,7 +133,7 @@ jobs:
               sleep 10
               runs_json=$(gh api "$workflow" 2>/dev/null || echo '{"workflow_runs":[]}')
               if jq -e --arg title "$expected" --argjson before "$before" \
-                   'any(.workflow_runs[]; .id > $before and .display_title == $title and (.status == "queued" or .status == "in_progress" or .status == "completed"))' <<<"$runs_json" >/dev/null; then
+                   'any(.workflow_runs[]; .id > $before and .display_title == $title and (.status == "queued" or .status == "in_progress" or .status == "completed" or .status == "pending" or .status == "waiting"))' <<<"$runs_json" >/dev/null; then
                 exit 0
               fi
             done
