@@ -32,11 +32,11 @@ permissions:
 # in a weekly PR (Dependabot cannot read workflow env); keep each value quoted
 # on its own line. The cache keys and install steps below read them from here.
 env:
-  PIN_PIP: "25.2"
-  PIN_SEMGREP: "1.176.0"
+  PIN_PIP: "26.2.1"
+  PIN_SEMGREP: "1.181.0"
   # The ~= release semgrep itself requires for its OpenTelemetry instrumentation.
   PIN_SEMGREP_OTEL: "0.58b0"
-  PIN_ZIZMOR: "1.30.0"
+  PIN_ZIZMOR: "1.30.1"
 
 jobs:
   semgrep:
