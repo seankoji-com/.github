@@ -760,8 +760,8 @@ class SourceContractTests(unittest.TestCase):
 
     def test_complete_scopes_and_current_pins_advisory_and_hosted_isolation(self):
         document = yaml.safe_load(WORKFLOW.read_text())
-        self.assertEqual(document["env"], {"PIN_PIP": "25.2", "PIN_SEMGREP": "1.176.0",
-                                           "PIN_SEMGREP_OTEL": "0.58b0", "PIN_ZIZMOR": "1.30.0"})
+        self.assertEqual(document["env"], {"PIN_PIP": "26.2.1", "PIN_SEMGREP": "1.181.0",
+                                           "PIN_SEMGREP_OTEL": "0.58b0", "PIN_ZIZMOR": "1.30.1"})
         self.assertEqual(document["permissions"], {"contents": "read"})
         self.assertEqual(document[True]["workflow_call"]["inputs"]["runner-json"]["default"], "")
         for tool, job in document["jobs"].items():
