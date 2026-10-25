@@ -94,7 +94,13 @@ explicit self-hosted `runner-json` values avoid that residual. Unset variables
 also leave private omissions on hosted until the operator provisions them.
 
 Persona recovery handles the CI App private key, so it never uses the shared
-pool. It accepts only `PERSONA_RECOVERY_RUNS_ON` equal to the contracted JSON
+pool. Per-head request jobs are disabled by default to avoid hosted charges on
+every PR head. Normal webhook review dispatch and the private controller's
+externally monitored sweep provide recovery. Set
+`PERSONA_RECOVERY_REQUEST_ENABLED=true` only to opt back into per-head requests;
+verify the sweep and its freshness alarm before adopting this default.
+Required persona-review and gatekeeper contexts are unchanged.
+When explicitly enabled, it accepts only `PERSONA_RECOVERY_RUNS_ON` equal to the contracted JSON
 string `["self-hosted","persona-recovery"]`: ephemeral, single-use JIT runners
 in the `persona-recovery` group, restricted to
 `seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@refs/heads/main`.

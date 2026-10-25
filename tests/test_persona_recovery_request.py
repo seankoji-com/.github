@@ -21,6 +21,11 @@ PERSONA_RUNS_ON = ("${{ vars.PERSONA_RECOVERY_RUNS_ON == '[\"self-hosted\",\"per
 
 
 class RecoveryRequestTests(unittest.TestCase):
+    def test_per_head_requests_are_opt_in_before_a_runner_is_allocated(self):
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        self.assertEqual(workflow['jobs']['request']['if'],
+                         "vars.PERSONA_RECOVERY_REQUEST_ENABLED == 'true'")
+
     def test_all_recovery_jobs_use_isolated_runners(self):
         workflow = yaml.safe_load(WORKFLOW.read_text())
         # This workflow accepts the App key. Keep every job off the shared
