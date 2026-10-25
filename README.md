@@ -112,8 +112,8 @@ Required persona-review and gatekeeper contexts are unchanged.
 Gate summaries still warn when an exact-head review has not been dispatched;
 disabling this optional request job does not suppress missing-review warnings.
 When explicitly enabled, it accepts only `PERSONA_RECOVERY_RUNS_ON` equal to the
-contracted JSON string `["self-hosted","persona-recovery"]`: ephemeral, single-use JIT runners
-in the `persona-recovery` group, restricted to
+contracted JSON string `["self-hosted","persona-recovery"]`: ephemeral,
+single-use JIT runners in the `persona-recovery` group, restricted to
 `seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@refs/heads/main`.
 The group must allow all repositories, including private ones, and run no other
 workloads. Its runners need bash, curl, jq, gh and the runner's bundled Node.
