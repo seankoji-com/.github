@@ -26,6 +26,9 @@ jobs:
     # sweep recover reviews without a paid runner for every PR head. Per-head
     # requests are an explicit operator fallback, disabled by default.
     if: vars.PERSONA_RECOVERY_REQUEST_ENABLED == 'true'
+    # The enable flag is resolved in the caller's repository context, including
+    # accessible organization variables; repository overrides take precedence.
+    # The following routing applies only when this request job is enabled.
     # This job handles an App private key, so it never runs on the shared
     # pool that also executes pull-request code. It runs on the runners named
     # by the org Actions variable PERSONA_RECOVERY_RUNS_ON, whose value is
@@ -37,7 +40,7 @@ jobs:
     # bash, curl, jq, gh and the runner's bundled Node (for
     # create-github-app-token). Repository variables override org variables;
     # accept only the contracted JSON string to prevent shared-pool routing.
-    # While the variable is unset or has any other value, the job falls
+    # While the routing variable is unset or has any other value, the enabled job falls
     # back to a fresh GitHub-hosted runner, so merging this before the runner
     # group exists cannot strand jobs in the queue. If scheduling fails, none
     # of the step-level warnings run. The private controller's scheduled
