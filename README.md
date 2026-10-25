@@ -94,9 +94,26 @@ explicit self-hosted `runner-json` values avoid that residual. Unset variables
 also leave private omissions on hosted until the operator provisions them.
 
 Persona recovery handles the CI App private key, so it never uses the shared
-pool. It accepts only `PERSONA_RECOVERY_RUNS_ON` equal to the contracted JSON
-string `["self-hosted","persona-recovery"]`: ephemeral, single-use JIT runners
-in the `persona-recovery` group, restricted to
+pool. Per-head request jobs are disabled by default to avoid hosted charges on
+every PR head. Normal webhook review dispatch and the private controller's
+externally monitored sweep provide recovery. Set
+`PERSONA_RECOVERY_REQUEST_ENABLED=true` only to opt back into per-head requests;
+verify the sweep and its freshness alarm before adopting this default.
+This Actions configuration variable is resolved in the **calling repository's**
+context. An organization variable applies only where that repository can access
+it; a repository variable overrides it. Setting it only in this `.github`
+repository does not enable other callers. An absent value or anything other
+than the exact string `true` silently skips the job, without allocating a runner
+or producing step logs. Set a caller override with
+`gh variable set PERSONA_RECOVERY_REQUEST_ENABLED --repo OWNER/REPO --body true`,
+or an organization value with the intended repository visibility. Inspect both
+scopes when diagnosing an override.
+Required persona-review and gatekeeper contexts are unchanged.
+Gate summaries still warn when an exact-head review has not been dispatched;
+disabling this optional request job does not suppress missing-review warnings.
+When explicitly enabled, it accepts only `PERSONA_RECOVERY_RUNS_ON` equal to the
+contracted JSON string `["self-hosted","persona-recovery"]`: ephemeral,
+single-use JIT runners in the `persona-recovery` group, restricted to
 `seankoji-com/.github/.github/workflows/reusable-persona-recovery-request.yml@refs/heads/main`.
 The group must allow all repositories, including private ones, and run no other
 workloads. Its runners need bash, curl, jq, gh and the runner's bundled Node.

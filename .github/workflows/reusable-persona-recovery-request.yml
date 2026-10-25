@@ -22,6 +22,13 @@ on:
 
 jobs:
   request:
+    # Primary webhook dispatch and the private controller's externally watched
+    # sweep recover reviews without a paid runner for every PR head. Per-head
+    # requests are an explicit operator fallback, disabled by default.
+    if: vars.PERSONA_RECOVERY_REQUEST_ENABLED == 'true'
+    # The enable flag is resolved in the caller's repository context, including
+    # accessible organization variables; repository overrides take precedence.
+    # The following routing applies only when this request job is enabled.
     # This job handles an App private key, so it never runs on the shared
     # pool that also executes pull-request code. It runs on the runners named
     # by the org Actions variable PERSONA_RECOVERY_RUNS_ON, whose value is
@@ -33,18 +40,14 @@ jobs:
     # bash, curl, jq, gh and the runner's bundled Node (for
     # create-github-app-token). Repository variables override org variables;
     # accept only the contracted JSON string to prevent shared-pool routing.
-    # While the variable is unset or has any other value, the job falls
+    # While the routing variable is unset or has any other value, the enabled job falls
     # back to a fresh GitHub-hosted runner, so merging this before the runner
     # group exists cannot strand jobs in the queue. If scheduling fails, none
     # of the step-level warnings run. The private controller's scheduled
     # sweep (every 15 minutes) can dispatch missing reviews independently,
     # subject to active-run/retry limits and available self-hosted capacity.
-    # Deliberately no job-level `if`: gating on the routing variable made the
-    # hosted fallback unreachable, so a repository with the variable unset
-    # skipped the request entirely and its PRs waited for the 15-minute sweep
-    # instead, the delay this file exists to remove. Routing belongs to
-    # `runs-on` alone; the credentials step below turns the job into a no-op
-    # when the key is absent, which is the check the `if` was standing in for.
+    # Enable only after verifying dedicated capacity or intentionally accepting
+    # hosted compute charges. This switch does not change required review gates.
     runs-on: ${{ vars.PERSONA_RECOVERY_RUNS_ON == '["self-hosted","persona-recovery"]' && fromJSON(vars.PERSONA_RECOVERY_RUNS_ON) || 'ubuntu-latest' }} # runner-keep-hosted (fallback while PERSONA_RECOVERY_RUNS_ON is unset/invalid; App private-key isolation)
     timeout-minutes: 10
     permissions:
