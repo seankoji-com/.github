@@ -217,10 +217,11 @@ class PlanTests(Sandbox):
     def test_plans_every_tool_and_never_picks_prereleases(self):
         changes, errors = utp.plan(self.root, good_network())
         self.assertEqual(errors, [])
+        current = utp.pins(self.root)
         self.assertEqual(
             {c.name: (c.old, c.new) for c in changes},
-            {"PIN_PIP": ("26.2.1", "28.0"),
-             "PIN_SEMGREP": ("1.181.0", "2.0.0"),
+            {"PIN_PIP": (current["PIN_PIP"], "28.0"),
+             "PIN_SEMGREP": (current["PIN_SEMGREP"], "2.0.0"),
              "PIN_SEMGREP_OTEL": ("0.58b0", "0.61b0"),
              "PIN_ZIZMOR": ("1.30.1", "1.31.0"),
              "PIN_ACTIONLINT": ("1.7.12", "1.8.0"),
@@ -257,10 +258,11 @@ class PlanTests(Sandbox):
 class MainTests(Sandbox):
     def test_writes_pins_in_place_then_is_idempotent(self):
         before = {f: self.text(f) for f in (utp.SCANNERS, utp.TESTS)}
+        current = utp.pins(self.root)
         report = self.root / "report.json"
         code, out, err = self.run_main("--report", str(report))
         self.assertEqual((code, err), (0, ""))
-        self.assertIn("semgrep: PIN_SEMGREP 1.181.0 -> 2.0.0", out)
+        self.assertIn(f"semgrep: PIN_SEMGREP {current['PIN_SEMGREP']} -> 2.0.0", out)
         self.assertEqual(utp.pins(self.root), {
             "PIN_PIP": "28.0", "PIN_SEMGREP": "2.0.0", "PIN_SEMGREP_OTEL": "0.61b0",
             "PIN_ZIZMOR": "1.31.0", "PIN_ACTIONLINT": "1.8.0", "PIN_ACTIONLINT_SHA256": DIGEST_NEW})
@@ -280,9 +282,10 @@ class MainTests(Sandbox):
 
     def test_check_mode_writes_nothing_and_signals_with_exit_1(self):
         before = {f: self.text(f) for f in (utp.SCANNERS, utp.TESTS)}
+        current = utp.pins(self.root)
         code, out, _ = self.run_main("--check")
         self.assertEqual(code, 1)
-        self.assertIn("PIN_PIP 26.2.1 -> 28.0", out)
+        self.assertIn(f"PIN_PIP {current['PIN_PIP']} -> 28.0", out)
         self.assertEqual({f: self.text(f) for f in before}, before)
 
     def test_errors_exit_2_but_good_bumps_are_still_written(self):
@@ -425,16 +428,19 @@ class ApplyReportTests(Sandbox):
         path.write_text(json.dumps({"changes": list(changes), "errors": []}))
         return str(path)
 
-    @staticmethod
-    def entry(name="PIN_PIP", old="26.2.1", new="28.0", file=utp.SCANNERS, tool="pip"):
+    def entry(self, name="PIN_PIP", old=None, new="28.0", file=utp.SCANNERS, tool="pip"):
+        if old is None:
+            current = utp.pins(self.root)
+            old = current.get(name, current["PIN_PIP"])
         return {"tool": tool, "file": file, "name": name, "old": old, "new": new}
 
     def test_applies_a_report_without_touching_the_network(self):
         net = good_network()
-        code, out, err = self.run_main("--apply-report", self.report(self.entry()), network=net)
+        entry = self.entry()
+        code, out, err = self.run_main("--apply-report", self.report(entry), network=net)
         self.assertEqual((code, err, net.requested), (0, "", []))
         self.assertEqual(utp.pins(self.root)["PIN_PIP"], "28.0")
-        self.assertIn("PIN_PIP 26.2.1 -> 28.0", out)
+        self.assertIn(f"PIN_PIP {entry['old']} -> 28.0", out)
 
     def test_rejects_tampered_reports_and_changes_nothing(self):
         before = self.text(utp.SCANNERS)
@@ -449,7 +455,7 @@ class ApplyReportTests(Sandbox):
             "bad digest": self.entry(name="PIN_ACTIONLINT_SHA256", file=utp.TESTS, old=DIGEST_OLD, new="abc"),
             "non-string": self.entry(new=26),
             "downgrade": self.entry(new="24.0"),
-            "no change": self.entry(new="26.2.1"),
+            "no change": self.entry(new=utp.pins(self.root)["PIN_PIP"]),
             "otel downgrade": self.entry(name="PIN_SEMGREP_OTEL", old="0.58b0", new="0.57b0", tool="semgrep"),
         }
         for label, entry in bad.items():
