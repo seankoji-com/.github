@@ -26,10 +26,9 @@ jobs:
   auto-merge:
     runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
     timeout-minutes: 5
-    # Gate on the PR AUTHOR, not github.actor. `actor` changes with whoever
-    # triggered the event, so a human reopen/re-run of a Dependabot PR — the
-    # usual way to recover a red run after a fix — would skip this job and
-    # leave gatekeeper red. The author is dependabot[bot] for the PR's life.
+    # Gate on the PR AUTHOR so human pushes/reopens still run the eligibility
+    # check and revoke stale auto-merge. Reruns retain the original event;
+    # github.triggering_actor identifies the rerun requester separately.
     if: >-
       github.event.pull_request.user.login == 'dependabot[bot]' &&
       github.event.pull_request.head.repo.full_name == github.repository
@@ -113,7 +112,11 @@ jobs:
                   echo "PR #$PR_NUMBER head \`$HEAD_SHA\` is ineligible for auto-merge: the event was sent by \`$EVENT_SENDER\`, not Dependabot, or a commit failed the author, committer or signature checks. Auto-merge is disabled. The PR remains subject to the repository's merge requirements."
                   echo
                   echo '```'
-                  printf '%s\n' "$foreign" | awk -F'\t' '{ printf "%s author=%s committer=%s verified=%s\n", substr($1, 1, 12), $2, $3, $4 }'
+                  if [ -n "$foreign" ]; then
+                      printf '%s\n' "$foreign" | awk -F'\t' '{ printf "%s author=%s committer=%s verified=%s\n", substr($1, 1, 12), $2, $3, $4 }'
+                  else
+                      echo 'All commits pass the author, committer and signature checks; only the event sender is ineligible.'
+                  fi
                   echo '```'
               } >> "$GITHUB_STEP_SUMMARY"
               echo "::notice::PR #$PR_NUMBER is not Dependabot's own change; auto-merge is disabled and does not apply."
