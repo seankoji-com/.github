@@ -17,8 +17,8 @@ on:
 # called from a `pull_request_target` context; a caller that omits its own
 # `permissions:` would otherwise inject the org-default token scope into the
 # job. The only credential this job actually uses is the GitHub App token from
-# the `app-token` step (for both metadata and `gh pr merge`), and the runner
-# GITHUB_TOKEN is never used for writes — so contents: read is sufficient.
+# the `app-token` step (for metadata, the commit listing and `gh pr merge`), and
+# the runner GITHUB_TOKEN is never used for writes — so contents: read is sufficient.
 permissions:
   contents: read
 
@@ -41,6 +41,87 @@ jobs:
           client-id: ${{ vars.SEANKOJI_CI_APP_ID }}
           private-key: ${{ secrets.SEANKOJI_CI_PRIVATE_KEY }}
 
+      # Eligibility. The PR author stays dependabot[bot] even after a person
+      # rebases or edits the branch, but such a head is no longer Dependabot's
+      # change: fetch-metadata (src/dependabot/verified_commits.ts) then refuses
+      # it with "PR is not from Dependabot" and the job fails. That refusal is
+      # correct, but a failing job is the wrong signal for a head that simply is
+      # not Dependabot's: it blocks the PR for a reason no fix can clear.
+      #
+      # A head is eligible only if EVERY commit is authored by dependabot[bot],
+      # committed by web-flow (GitHub's signing identity for Dependabot commits)
+      # and has a verified signature. Author alone is not enough: GitHub verifies
+      # the committer's key, so a person can sign a commit that names Dependabot
+      # as its author. Eligible heads still go through fetch-metadata's own
+      # verification below, unchanged.
+      #
+      # Commit fields alone cannot prove provenance: a squash merge made by a
+      # person on another branch records author dependabot[bot], committer
+      # web-flow and a verified GitHub signature (kumon-automation a9ef75b6), and
+      # could be pushed onto a Dependabot PR. So the triggering event must also be
+      # sent by Dependabot. A rerun keeps the original event's sender; a human
+      # push or reopen (the caller fires on opened, synchronize and reopened) is
+      # ineligible even when its commits look like Dependabot's, and loses
+      # auto-merge until Dependabot pushes again (for example `@dependabot rebase`).
+      #
+      # An ineligible head is never auto-merged. Skipping the merge step is not
+      # enough, because auto-merge enabled on an earlier bot head survives a push
+      # by someone with write access; so this step disables any existing
+      # auto-merge and fails the job if it cannot confirm that. The PR then
+      # remains subject to the repository's merge requirements like any other PR.
+      #
+      # The commits API lists at most 250 commits; a longer PR fails closed here.
+      - name: Check the head is Dependabot's own change
+        id: eligibility
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_SENDER: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
+          expected=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.commits')
+          commits=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/commits?per_page=100" \
+              --jq '.[] | [.sha, (.author.login // "none"), (.committer.login // "none"), (.commit.verification.verified | tostring)] | @tsv')
+          listed=$(printf '%s' "$commits" | grep -c . || true)
+          if [ "$listed" -eq 0 ] || [ "$listed" != "$expected" ]; then
+              echo "::error::PR #$PR_NUMBER has $expected commit(s) but $listed were listed (the API lists at most 250); refusing to classify eligibility."
+              exit 1
+          fi
+          listed_head=$(printf '%s\n' "$commits" | tail -n 1 | cut -f1)
+          if [ "$listed_head" != "$HEAD_SHA" ]; then
+              echo "::error::Listed PR head $listed_head is not the event head $HEAD_SHA; the branch moved during the run."
+              exit 1
+          fi
+          foreign=$(printf '%s\n' "$commits" | awk -F'\t' '$2 != "dependabot[bot]" || $3 != "web-flow" || $4 != "true"')
+          if [ -n "$foreign" ] || [ "$EVENT_SENDER" != "dependabot[bot]" ]; then
+              enabled=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')
+              if [ "$enabled" = "true" ]; then
+                  gh pr merge --disable-auto "$PR_URL"
+                  enabled=$(gh pr view "$PR_URL" --json autoMergeRequest --jq '.autoMergeRequest != null')
+              fi
+              if [ "$enabled" != "false" ]; then
+                  echo "::error::PR #$PR_NUMBER is not Dependabot's own change, and auto-merge could not be confirmed disabled."
+                  exit 1
+              fi
+              echo "eligible=false" >> "$GITHUB_OUTPUT"
+              {
+                  echo "### Dependabot auto-merge not applicable"
+                  echo
+                  echo "PR #$PR_NUMBER head \`$HEAD_SHA\` is ineligible for auto-merge: the event was sent by \`$EVENT_SENDER\`, not Dependabot, or a commit failed the author, committer or signature checks. Auto-merge is disabled. The PR remains subject to the repository's merge requirements."
+                  echo
+                  echo '```'
+                  printf '%s\n' "$foreign" | awk -F'\t' '{ printf "%s author=%s committer=%s verified=%s\n", substr($1, 1, 12), $2, $3, $4 }'
+                  echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "::notice::PR #$PR_NUMBER is not Dependabot's own change; auto-merge is disabled and does not apply."
+          else
+              echo "eligible=true" >> "$GITHUB_OUTPUT"
+              echo "Every commit in PR #$PR_NUMBER is authored by dependabot[bot], committed by web-flow and verified; the event sender is Dependabot."
+          fi
+
       # Classify the update from Dependabot's own metadata, never from the PR
       # title/body interpolated into the shell. A Dependabot changelog body
       # contains backticks and `$(...)`, which the shell executes as command
@@ -50,6 +131,7 @@ jobs:
       # bumps, so the workflow uses Dependabot's typed metadata instead.
       - name: Read Dependabot update metadata
         id: metadata
+        if: steps.eligibility.outputs.eligible == 'true'
         uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
         with:
           github-token: ${{ steps.app-token.outputs.token }}
@@ -62,6 +144,7 @@ jobs:
       # the values v3.1.0 can emit (src/dependabot/output.ts UPDATE_TYPES_PRIORITY)
       # so a broken output fails loudly instead.
       - name: Verify fetch-metadata update-type contract
+        if: steps.eligibility.outputs.eligible == 'true'
         env:
           UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
         run: |
@@ -77,11 +160,13 @@ jobs:
 
       - name: Enable auto-merge for patch and minor updates
         if: >-
+          steps.eligibility.outputs.eligible == 'true' && (
           steps.metadata.outputs.update-type == 'version-update:semver-patch' ||
-          steps.metadata.outputs.update-type == 'version-update:semver-minor'
+          steps.metadata.outputs.update-type == 'version-update:semver-minor')
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_URL: ${{ github.event.pull_request.html_url }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          gh pr merge --auto --squash "$PR_URL"
+          gh pr merge --auto --squash --match-head-commit "$HEAD_SHA" "$PR_URL"
           echo "Auto-merge enabled; it will merge when all required checks pass."
