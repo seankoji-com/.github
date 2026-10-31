@@ -43,5 +43,5 @@ high-priority task can have minor user impact.
   meaning.
 - Area labels such as `area:*` are optional and repository-specific.
 
-The organization label set is maintained by the private label-sync workflow.
-Repositories keep any custom labels they already have.
+The organization label set is maintained centrally. Repositories keep any
+custom labels they already have.
