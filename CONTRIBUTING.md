@@ -11,6 +11,12 @@ own contributing guide takes precedence when it has one.
 - Report vulnerabilities privately as described in the repository's security
   policy. Do not open a public issue with exploit details.
 
+## Labels
+
+Type, priority, severity and complexity are separate axes. Severity describes
+impact; priority describes when work is scheduled. Read
+[the label guide](docs/issue-labels.md) before choosing a severity or priority.
+
 ## Pull requests
 
 - Keep each pull request focused on one change.
