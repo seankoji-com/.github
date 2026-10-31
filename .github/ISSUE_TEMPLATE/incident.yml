@@ -8,10 +8,11 @@ body:
     id: severity
     attributes:
       label: Severity
+      description: Impact, not scheduling priority. Triage applies the matching severity label.
       options:
-        - SEV1 - complete outage, users impacted
-        - SEV2 - degraded, workaround exists
-        - SEV3 - minor, low or no user impact
+        - SEV1 - essential functionality unavailable, serious security exposure, or irreversible data loss
+        - SEV2 - degraded functionality with a workable alternative or workaround
+        - SEV3 - minor defect with low or no user impact
     validations:
       required: true
   - type: textarea

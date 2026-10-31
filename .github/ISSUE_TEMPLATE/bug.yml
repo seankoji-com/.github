@@ -8,12 +8,24 @@ body:
     id: priority
     attributes:
       label: Priority
+      description: When the work should be scheduled. Priority is separate from severity.
       options:
         - P1 - same-week fix
         - P2 - this-month fix
         - P3 - backlog
     validations:
       required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      description: Best estimate of impact. Triage confirms the level and applies the matching label.
+      options:
+        - SEV1 - essential functionality unavailable, serious security exposure, or irreversible data loss
+        - SEV2 - degraded functionality with a workable alternative or workaround
+        - SEV3 - minor defect with low or no user impact
+    validations:
+      required: false
   - type: dropdown
     id: complexity
     attributes:
