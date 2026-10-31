@@ -39,6 +39,7 @@ Available reusable workflows include:
 - `reusable-link-check.yml`
 - `reusable-review-event.yml`
 - `reusable-persona-recovery-request.yml`
+- `reusable-opencode-greenkeeper-signal.yml`
 - `released.yml`
 
 - [Node CI](.github/workflows/reusable-node-ci.yml) accepts `pnpm`, `npm`, or
