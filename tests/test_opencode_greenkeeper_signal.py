@@ -46,7 +46,14 @@ class SignalContractTests(unittest.TestCase):
         self.assertIn('["ubuntu-latest"]', job["runs-on"])
         self.assertIn("runner-keep-hosted", WORKFLOW.read_text(encoding="utf-8"))
         names = [step["name"] for step in job["steps"]]
-        self.assertEqual(names, ["Mint the dispatch token", "Dispatch the private controller"])
+        self.assertEqual(names, [
+            "Mint the dispatch token",
+            "Note a missing dispatch token",
+            "Dispatch the private controller",
+        ])
+        note = job["steps"][1]
+        self.assertEqual(note["if"], "steps.token.outcome != 'success'")
+        self.assertNotIn("secrets", note["run"])
         self.assertNotIn("checkout", WORKFLOW.read_text(encoding="utf-8"))
         for step in job["steps"]:
             self.assertTrue(step["continue-on-error"])
@@ -55,7 +62,7 @@ class SignalContractTests(unittest.TestCase):
         token = job["steps"][0]["with"]
         self.assertEqual(token["repositories"], ".github-private")
         self.assertEqual(token["owner"], "seankoji-com")
-        dispatch = job["steps"][1]
+        dispatch = job["steps"][2]
         self.assertEqual(dispatch["if"], "steps.token.outcome == 'success'")
         self.assertNotIn("echo ", dispatch["run"])
 
@@ -88,7 +95,32 @@ class SignalContractTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertFalse(called.exists())
+                    self.assertIn("::warning::greenkeeper signal skipped", result.stdout)
                     self.assertNotIn("sekret", result.stdout + result.stderr)
+
+    def test_missing_pull_request_stays_quiet(self):
+        script = dispatch_script()
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "gh"
+            fake.write_text("#!/bin/sh\necho called > \"$GH_CALLED\"\nexit 0\n", encoding="utf-8")
+            fake.chmod(0o755)
+            called = Path(tmp) / "called"
+            env = {
+                **os.environ,
+                "PATH": f"{tmp}:{os.environ.get('PATH', '')}",
+                "GH_CALLED": str(called),
+                "GH_TOKEN": "sekret",
+                "PR_NUMBER": "",
+                "HEAD_SHA": "a" * 40,
+                "REPOSITORY": "seankoji-com/example",
+            }
+            result = subprocess.run(
+                ["python3", "-c", script], text=True, capture_output=True, env=env,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(called.exists())
+        self.assertNotIn("::warning::", result.stdout)
+        self.assertNotIn("sekret", result.stdout + result.stderr)
 
     def test_valid_event_posts_only_the_dispatch_payload(self):
         script = dispatch_script()
@@ -140,6 +172,7 @@ class SignalContractTests(unittest.TestCase):
                 self.assertIn("--method\nPOST", recorded)
                 self.assertNotIn("sekret", recorded)
                 self.assertNotIn("sekret", result.stdout + result.stderr)
+                self.assertNotIn("::warning::", result.stdout)
                 self.assertEqual(payload, {
                     "event_type": "opencode-greenkeeper-requested",
                     "client_payload": {
@@ -154,13 +187,17 @@ class SignalContractTests(unittest.TestCase):
 
     def test_dispatch_failure_removes_the_payload(self):
         script = dispatch_script()
-        for name in ("missing", "stall"):
+        reasons = {
+            "missing": "could not start gh",
+            "stall": "timed out",
+            "unwritable": "could not write the payload",
+        }
+        for name, expected in reasons.items():
             with self.subTest(name=name):
                 with tempfile.TemporaryDirectory() as tmp:
-                    if name == "missing":
-                        env_path = str(Path(tmp) / "empty")
-                        Path(env_path).mkdir()
-                    else:
+                    called = Path(tmp) / "called"
+                    runner = tmp
+                    if name == "stall":
                         fake = Path(tmp) / "gh"
                         fake.write_text(
                             f"#!{sys.executable}\nimport time\ntime.sleep(30)\n",
@@ -168,10 +205,17 @@ class SignalContractTests(unittest.TestCase):
                         )
                         fake.chmod(0o755)
                         env_path = tmp
+                    else:
+                        env_path = str(Path(tmp) / "empty")
+                        Path(env_path).mkdir()
+                        if name == "unwritable":
+                            runner = str(Path(tmp) / "not-a-directory")
+                            Path(runner).write_text("x", encoding="utf-8")
                     env = {
                         **os.environ,
                         "PATH": env_path,
-                        "RUNNER_TEMP": tmp,
+                        "RUNNER_TEMP": runner,
+                        "GH_CALLED": str(called),
                         "DISPATCH_TIMEOUT_SECONDS": "1",
                         "PR_NUMBER": "7",
                         "HEAD_SHA": "a" * 40,
@@ -185,5 +229,8 @@ class SignalContractTests(unittest.TestCase):
                         [sys.executable, "-c", script], text=True, capture_output=True, env=env,
                     )
                     self.assertFalse((Path(tmp) / "greenkeeper-dispatch.json").exists())
+                    if name != "stall":
+                        self.assertFalse(called.exists())
                 self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(f"::warning::greenkeeper dispatch failed ({expected})", result.stdout)
                 self.assertNotIn("sekret", result.stdout + result.stderr)

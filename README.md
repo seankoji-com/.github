@@ -52,6 +52,10 @@ Available reusable workflows include:
   a runner with zsh available; private repositories should select the `mint` pool,
   whose runner image includes zsh. The caller's `.shellspec` selects
   the shell, for example `--shell /bin/zsh`. The workflow needs `contents: read`.
+- [OpenCode greenkeeper](.github/workflows/reusable-opencode-greenkeeper-signal.yml)
+  asks the private controller to look at one pull request. Pass the optional
+  `app_private_key` secret. The check stays green when that secret is missing
+  or the dispatch fails, and the log names the reason without printing the token.
 - [Issue triage](.github/workflows/reusable-issue-triage.yml) and
   [release markers](.github/workflows/released.yml) use `actions/github-script`.
   Callers selecting self-hosted runners must use Actions runner v2.327.1 or newer.
