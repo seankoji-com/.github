@@ -1,0 +1,138 @@
+name: OpenCode greenkeeper signal
+
+# Asks the private controller to look at one pull request. A failed dispatch
+# stays green because the private schedule retries it. This job does not check
+# out pull-request code and it does not print a credential.
+on:
+  workflow_call:
+    inputs:
+      # Omitted input uses self-hosted labels when the org Actions variable
+      # PRIVATE_REPO_SELF_HOSTED is true. Explicit runner-json always wins.
+      # See README.md#runner-selection.
+      runner-json:
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing.'
+        type: string
+        default: ''
+    secrets:
+      # Optional so a repository without the key still parses. The token step
+      # fails softly and the private schedule covers that pull request.
+      app_private_key:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  signal:
+    runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
+    timeout-minutes: 5
+    steps:
+      - name: Mint the dispatch token
+        id: token
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.SEANKOJI_CI_APP_ID }}
+          private-key: ${{ secrets.app_private_key }}
+          owner: seankoji-com
+          repositories: .github-private
+
+      - name: Note a missing dispatch token
+        if: steps.token.outcome != 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        run: echo '::warning::greenkeeper signal skipped (dispatch token was not minted)'
+
+      - name: Dispatch the private controller
+        if: steps.token.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.workflow_run.head_sha }}
+          ACTOR: ${{ github.actor }}
+          DELIVERY_ID: ${{ github.run_id }}-${{ github.run_attempt }}-${{ github.event_name }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          def warn(message):
+              print(f"::warning::{message}", flush=True)
+
+          number = os.environ.get("PR_NUMBER", "").strip()
+          sha = os.environ.get("HEAD_SHA", "").strip()
+          repository = os.environ.get("REPOSITORY", "").strip()
+          if not number:
+              sys.exit(0)
+          if not re.fullmatch(r"[1-9][0-9]{0,11}", number) or not re.fullmatch(r"[0-9a-f]{40}", sha):
+              warn("greenkeeper signal skipped (invalid pull request identifier)")
+              sys.exit(0)
+          if (
+              not re.fullmatch(r"seankoji-com/[A-Za-z0-9_.-]+", repository)
+              or repository.rsplit("/", 1)[1] in {".", ".."}
+          ):
+              warn("greenkeeper signal skipped (invalid repository)")
+              sys.exit(0)
+          kind = {"pull_request_review": "review", "workflow_run": "checks"}.get(
+              os.environ.get("EVENT_NAME", ""), "head"
+          )
+          payload = {
+              "event_type": "opencode-greenkeeper-requested",
+              "client_payload": {
+                  "repository": repository,
+                  "number": int(number),
+                  "head_sha": sha,
+                  "kind": kind,
+                  "delivery_id": os.environ.get("DELIVERY_ID", ""),
+                  "actor": os.environ.get("ACTOR", ""),
+              },
+          }
+          path = os.path.join(os.environ.get("RUNNER_TEMP") or "/tmp", "greenkeeper-dispatch.json")
+          code = 1
+          reason = "could not dispatch"
+          try:
+              try:
+                  with open(path, "w", encoding="utf-8") as handle:
+                      json.dump(payload, handle)
+              except OSError:
+                  reason = "could not write the payload"
+              else:
+                  try:
+                      limit = int(os.environ.get("DISPATCH_TIMEOUT_SECONDS", "60"))
+                  except ValueError:
+                      limit = 60
+                  limit = min(max(limit, 1), 60)
+                  try:
+                      result = subprocess.run(
+                          [
+                              "gh", "api", "--method", "POST",
+                              "--input", path,
+                              "repos/seankoji-com/.github-private/dispatches",
+                          ],
+                          check=False,
+                          timeout=limit,
+                      )
+                      code = result.returncode
+                      reason = "" if code == 0 else f"exit {code}"
+                  except subprocess.TimeoutExpired:
+                      reason = "timed out"
+                  except OSError:
+                      reason = "could not start gh"
+          finally:
+              try:
+                  os.remove(path)
+              except OSError:
+                  pass
+          if code != 0:
+              warn(f"greenkeeper dispatch failed ({reason})")
+          sys.exit(code)
+          PY
