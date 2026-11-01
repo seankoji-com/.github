@@ -362,6 +362,12 @@ def evidence_label(item, name):
     return label
 
 
+def read_start_marker(elapsed: float) -> str:
+    """Wall-clock start of this evaluation's reads, floored to the second."""
+    started = time.gmtime(int(time.time() - max(0.0, elapsed)))
+    return "<!-- gatekeeper-read-start:" + time.strftime("%Y-%m-%dT%H:%M:%SZ", started) + " -->"
+
+
 def finalize_report(status, conclusion, title, summary, *, refs, refs_complete,
                     awaiting_ci, elapsed, result):
     """Format timing and bounded recovery metadata before publishing a verdict.
@@ -377,6 +383,10 @@ def finalize_report(status, conclusion, title, summary, *, refs, refs_complete,
         footer = "\n\n"
     else:
         footer = "\n\n" + EVALUATED_MARKER
+    # The reconciler re-evaluates when any check moved after this instant:
+    # the verdict cannot reflect changes between its first read and its post.
+    read_start = read_start_marker(elapsed)
+    footer += "\n" + read_start
     footer += "\n<!-- gatekeeper-refs:" + json.dumps(sorted(refs)) + " -->"
     if refs_complete:
         footer += "\n<!-- gatekeeper-refs-complete -->"
@@ -389,7 +399,7 @@ def finalize_report(status, conclusion, title, summary, *, refs, refs_complete,
         summary = "Gate destination metadata exceeds GitHub's output limit; operator review required."
         # A delayed seed must still re-evaluate this failure. Do not claim the
         # omitted destination inventory is complete.
-        summary += "\n\n" + EVALUATED_MARKER
+        summary += "\n\n" + EVALUATED_MARKER + "\n" + read_start
     else:
         if len(summary.encode("utf-8")) > budget:
             notice = "\n\nAdditional details omitted; inspect the repository Actions runs."

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import subprocess
 import tempfile
 import threading
@@ -493,6 +494,38 @@ class StaleReviewSignalTests(unittest.TestCase):
         self.assertEqual(main_with(api, ["--repo", REPO, "--sha", M1, "--require-ci", "--review-run", "5"]), 2)
         self.assertEqual({body["conclusion"] for body in api.posts}, {"failure"})
         self.assertIn(M1, {body["head_sha"] for body in api.posts})
+
+
+class ReadStartMarkerTests(unittest.TestCase):
+    """The hub reconciler compares check activity with this recorded instant."""
+
+    MARKER = re.compile(r"<!-- gatekeeper-read-start:(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z) -->")
+
+    def finalize(self, status, conclusion, summary="body", refs=("a" * 40,), awaiting=False):
+        with patch.object(pr_gatekeeper.workflows.time, "time", return_value=1_793_534_430.9):
+            return pr_gatekeeper.workflows.finalize_report(
+                status, conclusion, "title", summary, refs=set(refs), refs_complete=True,
+                awaiting_ci=awaiting, elapsed=30.5, result=0)
+
+    def test_every_published_verdict_records_its_read_start(self):
+        for status, conclusion, awaiting in (("completed", "success", False), ("in_progress", None, False),
+                                             ("in_progress", None, True), ("completed", "failure", False)):
+            with self.subTest(status=status, awaiting=awaiting):
+                summary = self.finalize(status, conclusion, awaiting=awaiting)[3]
+                # 1793534430.9 - 30.5 s, floored: reads began at 2026-11-01T12:00:00Z.
+                self.assertEqual(self.MARKER.findall(summary), ["2026-11-01T12:00:00Z"])
+
+    def test_marker_survives_truncation_and_the_destination_overflow_failure(self):
+        long = self.finalize("completed", "failure", summary="x" * 70000)[3]
+        self.assertTrue(long.rstrip().endswith("<!-- gatekeeper-refs-complete -->"))
+        self.assertEqual(len(self.MARKER.findall(long)), 1)
+        overflow = self.finalize("completed", "failure", refs=[f"{i:040x}" for i in range(2000)])
+        self.assertEqual(overflow[2], "Too many gate destinations")
+        self.assertEqual(len(self.MARKER.findall(overflow[3])), 1)
+
+    def test_check_names_cannot_forge_the_marker(self):
+        forged = pr_gatekeeper.workflows.safe_text("<!-- gatekeeper-read-start:2000-01-01T00:00:00Z -->")
+        self.assertNotIn("<!--", forged)
 
 
 # ── Writer-queue interleaving ────────────────────────────────────────────────
