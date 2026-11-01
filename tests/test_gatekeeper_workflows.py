@@ -796,11 +796,12 @@ class CoalescedRefreshTests(unittest.TestCase):
 
 
     def test_unrelated_completions_cannot_replace_pr_refreshes(self):
-        import json
-        from types import SimpleNamespace
+        from test_gatekeeper_single_head import Arr, Ctx, pull, render
 
         # Evaluate the rendered admission expression against concrete events,
-        # including runs that the downstream gatekeeper job will skip.
+        # including runs that the downstream gatekeeper job will skip. Routine
+        # PR completions coalesce only with completions for the same head.
+        head = "f" * 40
         cases = [
             ("workflow_run", "pull_request", "CI", False, True),
             ("workflow_run", "dynamic", "CI", False, True),
@@ -813,22 +814,15 @@ class CoalescedRefreshTests(unittest.TestCase):
             ("pull_request_review", "", "", False, False),
             ("workflow_dispatch", "", "", False, False),
         ]
-        for visibility in ("public",):
-            caller = yaml.safe_load(GATE_CALLER.read_text())
-            expression = caller["concurrency"]["group"][3:-2].strip()
-            expression = expression.replace("&&", " and ").replace("||", " or ").replace("null", "None")
-            for event, upstream, name, attached, coalesces in cases:
-                with self.subTest(visibility=visibility, event=event, upstream=upstream, name=name, attached=attached):
-                    github = SimpleNamespace(event_name=event, repository="org/repo", run_id="42",
-                        event=SimpleNamespace(workflow_run=SimpleNamespace(event=upstream, name=name,
-                            pull_requests=[{}] if attached else [None])))
-                    actual = eval(expression, {"__builtins__": {}}, {
-                        "github": github, "fromJSON": json.loads,
-                        "contains": lambda values, value: value in values,
-                        "format": lambda pattern, value: pattern.format(value),
-                    })
-                    expected = "pr-gatekeeper-refresh-org/repo" if coalesces else "pr-gatekeeper-event-42"
-                    self.assertEqual(actual, expected)
+        group = yaml.safe_load(GATE_CALLER.read_text())["concurrency"]["group"]
+        for event, upstream, name, attached, coalesces in cases:
+            with self.subTest(event=event, upstream=upstream, name=name, attached=attached):
+                run = Ctx(event=upstream, name=name, head_sha=head,
+                          pull_requests=Arr([pull(head)] if attached else []))
+                github = Ctx(event_name=event, repository="org/repo", run_id="42",
+                             event=Ctx(workflow_run=run) if event == "workflow_run" else Ctx())
+                expected = f"pr-gatekeeper-refresh-org/repo-{head}" if coalesces else "pr-gatekeeper-event-42"
+                self.assertEqual(render(group, {"github": github}), expected)
 
 
     def test_gatekeeper_job_admission_condition(self):

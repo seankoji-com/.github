@@ -443,8 +443,9 @@ class StaleReviewSignal(ValueError):
 
     A review event can sit in the workflow_run queue long enough for its PR to
     close or merge first, so the signal then belongs to no open PR and there is
-    nothing left to publish. Subclasses ValueError so the paths that cannot
-    rely on a follow-up sweep keep failing closed on it.
+    nothing left to publish. Subclasses ValueError so a caller that does not
+    handle it fails closed. The single-head path re-evaluates any open PR its
+    previous gate published to (see stale_signal_heads).
     """
 
 
@@ -471,6 +472,21 @@ def resolve_review_heads(repo: str, run_id: int, token: str, open_prs: list[dict
     if not heads:
         raise StaleReviewSignal("could not associate review event with an open PR")
     return sorted(heads)
+
+
+def stale_signal_heads(repo: str, sha: str, token: str, open_prs: list[dict]) -> list[str]:
+    """Open heads an unassociated review signal's previous gate still covers.
+
+    Without a sweep, a signal that no longer matches an open PR by number,
+    branch or commit can still concern one: a deleted fork loses its branch
+    identity, and base movement replaces the merge SHA the run recorded. The
+    gate last published for the signal SHA lists its destinations; re-evaluate
+    every open PR among them. Only a fully read, empty result means nothing is
+    left to publish. Read failures propagate to the blocking fallback.
+    """
+    refs = previous_publication_refs(repo, sha, token)
+    return sorted({pr["head"]["sha"] for pr in open_prs
+                   if refs & {pr["head"]["sha"], pr.get("merge_commit_sha")}})
 
 
 def previous_publication_refs(repo: str, sha: str, token: str) -> set[str]:
@@ -768,7 +784,14 @@ def main(argv: list[str]) -> int:
                               require_ci=args.require_ci)
     if args.review_run:
         try:
-            heads = resolve_review_heads(args.repo, args.review_run, token)
+            prs = _list_all(f"/repos/{args.repo}/pulls?state=open", token)
+            try:
+                heads = resolve_review_heads(args.repo, args.review_run, token, prs)
+            except StaleReviewSignal as exc:
+                heads = stale_signal_heads(args.repo, args.sha, token, prs)
+                if not heads:
+                    print(f"::notice::{exc}; no open PR uses its previous gate destinations", file=sys.stderr)
+                    return 0
         except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
             return report(args.repo, args.sha, token, args.dry_run, error=str(exc), **contract_args)
         return max(report(args.repo, head, token, args.dry_run, require_ci=args.require_ci, **contract_args) for head in heads)

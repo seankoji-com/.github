@@ -1222,6 +1222,7 @@ class TestReviewEventResolution(unittest.TestCase):
 
     def test_unassociated_signal_posts_blocking_fallback(self):
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
+             patch.object(pr_gatekeeper, "_list_all", return_value=[]), \
              patch.object(pr_gatekeeper, "resolve_review_heads", side_effect=ValueError("unassociated")), \
              patch.object(pr_gatekeeper, "previous_publication_refs", return_value=set()), \
              patch.object(pr_gatekeeper, "_post") as post:
@@ -1229,18 +1230,19 @@ class TestReviewEventResolution(unittest.TestCase):
             self.assertEqual(post.call_args.args[2]["head_sha"], "merge")
             self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
 
-    def test_stale_signal_stays_fail_closed_without_a_reconcile_sweep(self):
-        # Without --reconcile-open nothing else publishes for this run, so a
-        # stale signal must keep producing the blocking fallback rather than
-        # exiting 0 with no check posted.
+    def test_stale_signal_without_a_sweep_reevaluates_previous_open_destinations(self):
+        # Without --reconcile-open nothing else publishes for this run. The
+        # previous gate's destinations decide which open PRs still need it;
+        # tests/test_gatekeeper_single_head.py covers the closed-PR case.
         stale = pr_gatekeeper.StaleReviewSignal("could not associate review event with an open PR")
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
+             patch.object(pr_gatekeeper, "_list_all", return_value=[self.pr()]), \
              patch.object(pr_gatekeeper, "resolve_review_heads", side_effect=stale), \
-             patch.object(pr_gatekeeper, "previous_publication_refs", return_value=set()), \
-             patch.object(pr_gatekeeper, "_post") as post:
-            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "merge", "--review-run", "123"]), 2)
-            self.assertEqual(post.call_args.args[2]["head_sha"], "merge")
-            self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
+             patch.object(pr_gatekeeper, "previous_publication_refs", return_value={"merge"}), \
+             patch.object(pr_gatekeeper, "report", return_value=0) as report_mock:
+            self.assertEqual(pr_gatekeeper.main(["--repo", "org/repo", "--sha", "old", "--review-run", "123"]), 0)
+            self.assertEqual([c.args[1] for c in report_mock.call_args_list], ["head"])
+            self.assertNotIn("error", report_mock.call_args.kwargs)
 
     def test_unreadable_open_pr_list_is_not_reported_as_a_stale_signal(self):
         event = {"event": "pull_request_review", "head_sha": "merge", "pull_requests": []}
@@ -1377,7 +1379,7 @@ class TestReviewEventResolution(unittest.TestCase):
         self.assertEqual(caller["jobs"]["gatekeeper"]["concurrency"],
                          {"group": "pr-gatekeeper-${{ github.repository }}",
                           "cancel-in-progress": False, "queue": "max"})
-        self.assertTrue(caller["jobs"]["gatekeeper"]["with"]["reconcile_open"])
+        self.assertEqual(caller["jobs"]["gatekeeper"]["with"]["sweep"], "event")
         for signal in ("recover-persona", "review-event"):
             self.assertIn(signal, caller["jobs"])
         holders = {name for name, job in caller["jobs"].items() if "concurrency" in job}

@@ -39,6 +39,10 @@ on:
         description: 'Refresh every open PR after handling the triggering event. Required for a bounded caller queue.'
         type: boolean
         default: false
+      sweep:
+        description: 'open: reconcile_open decides (legacy). event: evaluate only the event head, its merge refs and PRs sharing it, with CI registration required; reconcile_open is ignored. Needs per-head caller admission.'
+        type: string
+        default: open
       required_workflows:
         description: 'Optional JSON array of {path, event, ref: head|merge}. ref binds Actions REST head_sha, not checkout SHA; PR merge checkouts commonly report head. Empty preserves legacy gating.'
         type: string
@@ -104,6 +108,7 @@ jobs:
           PERSONA_STATE: ${{ inputs.persona_state }}
           PERSONA_PR: ${{ inputs.persona_pr }}
           REQUIRE_CI: ${{ inputs.reconcile_open }}
+          SWEEP: ${{ inputs.sweep }}
           GATEKEEPER_REQUIRED_WORKFLOWS: ${{ inputs.required_workflows }}
         run: |
           # review_run_id is caller-supplied public API and --review-run is
@@ -112,10 +117,29 @@ jobs:
           # Guard the shape (as JOB_WORKFLOW_SHA does above) and fall back to
           # plain --sha evaluation so a bad value cannot suppress the check.
           args=()
-          if [ "${REQUIRE_CI:-false}" = "true" ]; then args+=(--require-ci); fi
-          # Replaced events still require every current PR to be refreshed.
-          # One invocation shares destination tracking with the event path.
-          if [ "${REQUIRE_CI:-false}" = "true" ] && [ "$SEED" != "true" ]; then args+=(--reconcile-open); fi
+          case "${SWEEP:-open}" in
+            open)
+              if [ "${REQUIRE_CI:-false}" = "true" ]; then args+=(--require-ci); fi
+              # Replaced events still require every current PR to be refreshed.
+              # One invocation shares destination tracking with the event path.
+              if [ "${REQUIRE_CI:-false}" = "true" ] && [ "$SEED" != "true" ]; then args+=(--reconcile-open); fi
+              ;;
+            event)
+              # Per-head caller admission means a replaced event is always for
+              # this same head, so no sweep is needed to recover lost events.
+              # Without a SHA there is nothing to evaluate; never fall back to
+              # a sweep or a guessed head.
+              if [[ ! "${HEAD_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "::error::sweep=event requires a 40-hex head_sha"
+                exit 1
+              fi
+              args+=(--require-ci)
+              ;;
+            *)
+              echo "::error::Invalid sweep '${SWEEP}'; expected open or event"
+              exit 1
+              ;;
+          esac
           if [ -n "$REVIEW_RUN_ID" ]; then
             # Match the whole string, not one line of it: a multiline value
             # such as $'123\ninvalid' would satisfy a per-line grep and still
