@@ -142,6 +142,16 @@ as the trigger and permissions reference. Its `head_sha` input identifies the
 commit to evaluate; retain the PR seed, workflow completion and review-event
 triggers when adapting it.
 
+Pass `sweep: event` with that caller's per-head admission group. Each job then
+evaluates only its own head, that head's merge refs and every PR sharing it.
+`event` always requires CI registration and ignores `reconcile_open`. The
+default, `sweep: open`, keeps the older behaviour: `reconcile_open` (default
+`false`) decides whether to require CI registration and re-evaluate every open
+PR on every event. Use `event` only with
+per-head admission. A repo-wide admission group can replace one PR's pending
+refresh with another PR's, and nothing would then re-evaluate the first PR. In
+`event` mode the job fails before evaluation without a 40-hex `head_sha`.
+
 The gate also waits for the latest Actions runs on the evaluated commit,
 including queued workflows that have not created job checks yet. It cannot
 detect a test workflow that was never triggered; keep required test callers
