@@ -1231,9 +1231,8 @@ class TestReviewEventResolution(unittest.TestCase):
             self.assertEqual(post.call_args.args[2]["conclusion"], "failure")
 
     def test_stale_signal_without_a_sweep_reevaluates_previous_open_destinations(self):
-        # Without --reconcile-open nothing else publishes for this run. The
-        # previous gate's destinations decide which open PRs still need it;
-        # tests/test_gatekeeper_single_head.py covers the closed-PR case.
+        # The previous gate's destinations pick the open PRs to re-evaluate
+        # (closed-PR case: tests/test_gatekeeper_single_head.py).
         stale = pr_gatekeeper.StaleReviewSignal("could not associate review event with an open PR")
         with patch.dict(pr_gatekeeper.os.environ, {"GITHUB_TOKEN": "fake"}), \
              patch.object(pr_gatekeeper, "_list_all", return_value=[self.pr()]), \

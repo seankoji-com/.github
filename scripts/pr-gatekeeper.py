@@ -477,12 +477,9 @@ def resolve_review_heads(repo: str, run_id: int, token: str, open_prs: list[dict
 def stale_signal_heads(repo: str, sha: str, token: str, open_prs: list[dict]) -> list[str]:
     """Open heads an unassociated review signal's previous gate still covers.
 
-    Without a sweep, a signal that no longer matches an open PR by number,
-    branch or commit can still concern one: a deleted fork loses its branch
-    identity, and base movement replaces the merge SHA the run recorded. The
-    gate last published for the signal SHA lists its destinations; re-evaluate
-    every open PR among them. Only a fully read, empty result means nothing is
-    left to publish. Read failures propagate to the blocking fallback.
+    A deleted fork loses branch identity and base movement replaces the run's
+    merge SHA, so re-evaluate every open PR among the destinations last gated
+    for the signal SHA. Read failures propagate to the blocking fallback.
     """
     refs = previous_publication_refs(repo, sha, token)
     return sorted({pr["head"]["sha"] for pr in open_prs
