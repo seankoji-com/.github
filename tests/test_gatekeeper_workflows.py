@@ -758,7 +758,8 @@ class CoalescedRefreshTests(unittest.TestCase):
     def test_refresh_shares_one_invocation_and_preserves_seed_and_signal_arguments(self):
         config = yaml.safe_load((WORKFLOWS / "reusable-pr-gatekeeper.yml").read_text())
         self.assertEqual(config[True]["workflow_call"]["inputs"]["reconcile_open"], {
-            "description": "Refresh every open PR after handling the triggering event. Required for a bounded caller queue.",
+            "description": "sweep: open only. Require CI registration and refresh every open PR after the "
+                           "triggering event. Required for a repo-wide caller queue. No effect with sweep: event.",
             "type": "boolean", "default": False,
         })
         steps = config["jobs"]["all-checks-passed"]["steps"]

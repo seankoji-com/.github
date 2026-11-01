@@ -36,11 +36,11 @@ on:
         type: boolean
         default: false
       reconcile_open:
-        description: 'Refresh every open PR after handling the triggering event. Required for a bounded caller queue.'
+        description: 'sweep: open only. Require CI registration and refresh every open PR after the triggering event. Required for a repo-wide caller queue. No effect with sweep: event.'
         type: boolean
         default: false
       sweep:
-        description: 'open: reconcile_open decides (legacy). event: evaluate only the event head, its merge refs and PRs sharing it, with CI registration required; reconcile_open is ignored. Needs per-head caller admission.'
+        description: 'open (legacy): reconcile_open decides. event: always require CI registration and evaluate only the event head, its merge refs and PRs sharing it; reconcile_open has no effect. Needs per-head caller admission.'
         type: string
         default: open
       required_workflows:
