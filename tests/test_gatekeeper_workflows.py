@@ -581,11 +581,14 @@ class RequiredWorkflowTests(unittest.TestCase):
 
     def test_manifest_environment_and_literal_argv_are_equivalent(self):
         self.install(self.required_run())
-        self.assertEqual(self.invoke(self.manifest()), 0)
-        reads, bodies = self.reads[:], self.bodies[:]
-        self.reads, self.bodies = [], []
-        with patch.dict(os.environ, {"GATEKEEPER_REQUIRED_WORKFLOWS": self.manifest()}):
-            self.assertEqual(self.invoke(), 0)
+        # Freeze both clocks: payloads carry the elapsed time and read start.
+        with patch.object(pr_gatekeeper.time, "monotonic", return_value=100.0), \
+             patch.object(pr_gatekeeper.workflows.time, "time", return_value=1_793_534_430.0):
+            self.assertEqual(self.invoke(self.manifest()), 0)
+            reads, bodies = self.reads[:], self.bodies[:]
+            self.reads, self.bodies = [], []
+            with patch.dict(os.environ, {"GATEKEEPER_REQUIRED_WORKFLOWS": self.manifest()}):
+                self.assertEqual(self.invoke(), 0)
         self.assertCountEqual(self.reads, reads)
         self.assertEqual(self.bodies, bodies)
 
