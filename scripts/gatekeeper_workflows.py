@@ -21,6 +21,33 @@ import urllib.parse
 GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
 EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->"
 
+# Coalescing control signals (#4469). The OpenCode greenkeeper caller keeps only
+# the newest signal per pull request (`cancel-in-progress: true` on a
+# PR-numbered group), so every superseded signal ends as `cancelled` by design.
+# That workflow validates nothing: it checks out no code, every step is
+# `continue-on-error`, the controller re-reads the pull request when it acts and
+# the private schedule reconciles whatever a signal missed. Counting the
+# cancellation reported an otherwise valid head as failing - permanently, since
+# a cancelled run is the last word for its event key.
+#
+# Eligibility is exact and fail-closed. Only a `cancelled` conclusion of one of
+# these paths, or of the job check run composed from the reusable's workflow and
+# job name, is treated as superseded. Any other conclusion (`failure`,
+# `timed_out`, `action_required`, a missing conclusion), any other path and any
+# other app still blocks. The run stays in the inventory, so a caller that
+# declares the workflow in `required_workflows` still has it evaluated.
+COALESCING_SIGNAL_PATHS = frozenset({
+    ".github/workflows/call-reusable-opencode-greenkeeper.yml",
+})
+COALESCING_SIGNAL_CHECK = "OpenCode greenkeeper signal / signal"
+COALESCING_SIGNAL_CHECKS = frozenset({COALESCING_SIGNAL_CHECK})
+COALESCING_SIGNAL_HINT = "Superseded by a newer coalescing signal; not required here"
+
+
+def is_coalescing_signal_path(path) -> bool:
+    """True when `path` names a workflow this gate treats as a control signal."""
+    return isinstance(path, str) and path.split("@", 1)[0] in COALESCING_SIGNAL_PATHS
+
 
 class WorkflowInventoryDrift(ValueError):
     """A paginated run inventory changed or was incomplete during the read."""
@@ -87,12 +114,26 @@ def _collect_workflow_checks(get, batch_fn, repo: str, sha: str, token: str,
     def label(value):
         return " ".join(str(value).split())[:100]
 
-    checks = [{"id": run["id"],
-             "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); run {run['id']}. "
-                      "Resolve pending execution/approval or rerun unsuccessful runs"),
-             "html_url": f"https://github.com/{repo}/actions/runs/{run['id']}",
-             "status": run.get("status"), "conclusion": run.get("conclusion")}
-            for key, (_, run) in latest.items()]
+    def published_check(key, run):
+        """Report the surviving run, normalising a superseded control signal.
+
+        A coalescing signal that lost its place carries no verdict, so it is
+        published as `skipped` (passing) with the reason in its label rather
+        than as `cancelled`, which the conclusion allowlist blocks. Every other
+        conclusion is reported exactly as GitHub recorded it.
+        """
+        hint = "Resolve pending execution/approval or rerun unsuccessful runs"
+        conclusion = run.get("conclusion")
+        if conclusion == "cancelled" and is_coalescing_signal_path(run["path"]):
+            conclusion = "skipped"
+            hint = COALESCING_SIGNAL_HINT
+        return {"id": run["id"],
+                "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); run {run['id']}. "
+                         f"{hint}"),
+                "html_url": f"https://github.com/{repo}/actions/runs/{run['id']}",
+                "status": run.get("status"), "conclusion": conclusion}
+
+    checks = [published_check(key, run) for key, (_, run) in latest.items()]
     return checks, known_suites - selected_suites
 
 

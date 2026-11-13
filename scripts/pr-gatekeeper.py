@@ -71,6 +71,9 @@ GATE_APP_ID = 15368  # GitHub Actions app; the only summary we trust for dispatc
 # by exact name and the Actions app, not by the gate's check suite, so an
 # unrelated job can never be skipped by sharing a suite with the gate.
 ADVISORY_CHECK_NAMES = frozenset({"recover-persona / request"})
+# The coalescing control signal's job check-run name (#4469). Its cancelled
+# conclusion is superseded by design, so it never blocks.
+COALESCING_SIGNAL_CHECK = workflows.COALESCING_SIGNAL_CHECK
 PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
 PERSONA_CHECK_NAME = "persona / grumpy-engineer"
 PERSONA_STATE_RE = re.compile(
@@ -112,6 +115,14 @@ def dedupe_check_runs(check_runs: list[dict]) -> list[dict]:
             continue
         app = run.get("app") or {}
         if name in ADVISORY_CHECK_NAMES and app.get("id") == GATE_APP_ID:
+            continue
+        # A superseded coalescing control signal (#4469): the producer cancels
+        # every signal a newer one replaces, so `cancelled` here records a lost
+        # queue position, not a failed check. Only that exact conclusion is
+        # excused; a failure, timeout or any other conclusion on the same job
+        # still blocks, and every other check is unaffected.
+        if (name in workflows.COALESCING_SIGNAL_CHECKS and app.get("id") == GATE_APP_ID
+                and run.get("conclusion") == "cancelled"):
             continue
         key = (app.get("id"), (run.get("check_suite") or {}).get("id"), name)
         current = latest.get(key)
