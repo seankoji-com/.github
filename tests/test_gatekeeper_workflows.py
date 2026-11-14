@@ -69,6 +69,90 @@ class WorkflowInventoryTests(unittest.TestCase):
         self.assertEqual(self.verdict([workflow(run_attempt=2, status="queued", conclusion=None)]),
                          ("in_progress", None))
 
+    def inventory(self, runs):
+        with patch.object(pr_gatekeeper, "_get", return_value={"workflow_runs": runs, "total_count": len(runs)}):
+            return pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+
+    def test_a_coalesced_signal_cancellation_is_superseded_not_failed(self):
+        # #4469: the greenkeeper caller cancels every signal a newer one
+        # replaces, so a cancelled run of that exact caller reports a lost queue
+        # position rather than a failed check. Counting it pinned otherwise
+        # valid heads red for the rest of the commit's life.
+        path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        checks, _ = self.inventory([workflow(path=path, conclusion="cancelled")])
+        self.assertEqual(checks[0]["conclusion"], "skipped")
+        self.assertIn(pr_gatekeeper.workflows.COALESCING_SIGNAL_HINT, checks[0]["name"])
+        self.assertIn("rerun unsuccessful runs", self.inventory([workflow()])[0][0]["name"])
+        self.assertEqual(pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2],
+                         ("completed", "success"))
+
+    def test_a_coalesced_signal_still_blocks_on_every_other_conclusion(self):
+        path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        for conclusion in ("failure", "timed_out", "action_required", None):
+            with self.subTest(conclusion=conclusion):
+                checks, _ = self.inventory([workflow(path=path, conclusion=conclusion)])
+                self.assertEqual(checks[0]["conclusion"], conclusion)
+                self.assertEqual(pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2],
+                                 ("completed", "failure"))
+
+    def test_only_the_exact_coalescing_path_is_eligible(self):
+        for path in (".github/workflows/call-reusable-opencode-greenkeeper-copy.yml",
+                     ".github/workflows/opencode-greenkeeper.yml",
+                     ".github/workflows/call-reusable-pr-gatekeeper-copy.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(self.verdict([workflow(path=path, conclusion="cancelled")]),
+                                 ("completed", "failure"))
+
+    def test_a_pending_coalescing_signal_still_holds_the_gate(self):
+        path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        self.assertEqual(self.verdict([workflow(path=path, status="queued", conclusion=None)]),
+                         ("in_progress", None))
+
+    def test_a_declared_coalescing_signal_is_still_evaluated(self):
+        # The normalisation is for the published verdict only: a caller that
+        # declares the workflow required still reads the raw run from the
+        # inventory, so the exemption cannot be used to skip a real requirement.
+        path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        inventory = {}
+        with patch.object(pr_gatekeeper, "_get", return_value={
+                "workflow_runs": [workflow(path=path, conclusion="cancelled")], "total_count": 1}):
+            pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token", inventory)
+        self.assertEqual([run["conclusion"] for run in inventory["head"]], ["cancelled"])
+
+    def test_a_coalesced_signal_head_with_green_validation_passes(self):
+        # The reported #4469 shape: a valid head whose validation all passed,
+        # where the only red entries are a cancelled greenkeeper signal run and
+        # the cancelled job inside it. The gate counted both, reported "2 checks
+        # failing", and nothing later replaced them because the signal is the
+        # last run for its event key.
+        signal_path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        runs = [workflow(ident=1, workflow_id=10, check_suite_id=100),
+                workflow(ident=2, workflow_id=30, path=signal_path, event="pull_request_target",
+                         check_suite_id=101, conclusion="cancelled")]
+        checks = [{"id": 1, "name": "build", "check_suite": {"id": 100},
+                   "status": "completed", "conclusion": "success"},
+                  {"id": 2, "name": "OpenCode greenkeeper signal / signal",
+                   "check_suite": {"id": 101}, "app": {"id": pr_gatekeeper.GATE_APP_ID},
+                   "status": "completed", "conclusion": "cancelled"}]
+        suites = [{"id": 100, "status": "completed", "latest_check_runs_count": 1},
+                  {"id": 101, "status": "completed", "latest_check_runs_count": 1}]
+        with patch.object(pr_gatekeeper, "_get", side_effect=inventory_responses([
+                {"check_runs": checks}, EMPTY_STATUSES, {"check_suites": suites},
+                {"workflow_runs": runs, "total_count": len(runs)}])):
+            status, conclusion, title, summary = pr_gatekeeper.evaluate(
+                *pr_gatekeeper.collect("org/repo", "head", "token"))
+        self.assertEqual((status, conclusion), ("completed", "success"), summary)
+        self.assertEqual(title, "All checks passed")
+        # A genuine failure in the same snapshot still wins.
+        runs[0] = workflow(ident=1, workflow_id=10, check_suite_id=100, conclusion="failure")
+        with patch.object(pr_gatekeeper, "_get", side_effect=inventory_responses([
+                {"check_runs": checks}, EMPTY_STATUSES, {"check_suites": suites},
+                {"workflow_runs": runs, "total_count": len(runs)}])):
+            status, conclusion, title, summary = pr_gatekeeper.evaluate(
+                *pr_gatekeeper.collect("org/repo", "head", "token"))
+        self.assertEqual((status, conclusion), ("completed", "failure"))
+        self.assertIn("test.yml", summary)
+
     def test_old_heads_are_ignored_but_distinct_events_and_workflows_are_not(self):
         self.assertEqual(self.verdict([workflow(head_sha="old", conclusion="cancelled"), workflow(ident=2)]),
                          ("completed", "success"))
