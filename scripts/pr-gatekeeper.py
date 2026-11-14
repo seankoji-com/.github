@@ -25,7 +25,7 @@ Four payloads are read, and each is load-bearing:
     would block every PR in the org forever.
   * `/actions/runs?head_sha={sha}` — workflows can be queued before any jobs
     exist. Their latest runs must finish too; zero-job external app suites
-    remain ignored. The gatekeeper workflow itself is excluded.
+    remain ignored. The gate and `ADVISORY_WORKFLOWS` callers are excluded.
 
 `conclusion` is None unless `status == "completed"`. `in_progress` is a check
 run *status*; supplying any conclusion forces `status: completed`, so
@@ -93,43 +93,9 @@ PASSING_STATUS_STATES = frozenset({"success"})
 PENDING_STATUS_STATES = frozenset({"pending"})
 
 
-def _latest_key(run: dict) -> tuple:
-    """Ordering used to pick the surviving run of a duplicated (app, name).
-
-    `filter=latest` is meant to do this server-side, but it is pinned rather
-    than relied on: the re-run case is the one that pins the gate red.
-    """
-    return (
-        run.get("started_at") or "",
-        run.get("completed_at") or "",
-        run.get("id") or 0,
-    )
-
-
 def dedupe_check_runs(check_runs: list[dict]) -> list[dict]:
     """Drop the gate's own and advisory runs, then keep one run per (app.id, name)."""
-    latest: dict[tuple, dict] = {}
-    for run in check_runs:
-        name = run.get("name") or ""
-        if name == GATE_CHECK_NAME:
-            continue
-        app = run.get("app") or {}
-        if name in ADVISORY_CHECK_NAMES and app.get("id") == GATE_APP_ID:
-            continue
-        # A superseded coalescing control signal (#4469): the producer cancels
-        # every signal a newer one replaces, so `cancelled` here records a lost
-        # queue position, not a failed check. Only that exact conclusion is
-        # excused; a failure, timeout or any other conclusion on the same job
-        # still blocks, and every other check is unaffected.
-        if (name in workflows.COALESCING_SIGNAL_CHECKS and app.get("id") == GATE_APP_ID
-                and run.get("conclusion") == "cancelled"):
-            continue
-        key = (app.get("id"), (run.get("check_suite") or {}).get("id"), name)
-        current = latest.get(key)
-        if current is None or _latest_key(run) >= _latest_key(current):
-            latest[key] = run
-    return sorted(latest.values(), key=lambda r: (r.get("name") or "", r.get("id") or 0))
-
+    return workflows.dedupe_check_runs(check_runs, GATE_CHECK_NAME, GATE_APP_ID, ADVISORY_CHECK_NAMES)
 
 
 def evaluate(
