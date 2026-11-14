@@ -164,8 +164,8 @@ events that caller declares (`pull_request_target`, `pull_request_review` and
 `workflow_run`) are left out of the gate, with their job check runs and any
 check suite that no gated run shares. They never hold or fail the gate, in any
 state. A run of that path from any other event is gated: a `cancelled` run
-passes as superseded, any other conclusion blocks and it holds the gate while
-running. A cancelled GitHub Actions check run named exactly
+passes as superseded, any other unsuccessful conclusion blocks and it holds the
+gate while running. A cancelled GitHub Actions check run named exactly
 `OpenCode greenkeeper signal / signal` also passes.
 `required_workflows` cannot declare those three events, so the exception cannot
 hide a declared requirement.
