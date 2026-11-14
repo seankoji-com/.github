@@ -157,6 +157,19 @@ including queued workflows that have not created job checks yet. It cannot
 detect a test workflow that was never triggered; keep required test callers
 and their trigger coverage under repository review.
 
+The OpenCode greenkeeper signal is the one exception. It checks no code, and
+its caller keeps only the newest signal per pull request and cancels the rest.
+Runs of `.github/workflows/call-reusable-opencode-greenkeeper.yml` from the
+events that caller declares (`pull_request_target`, `pull_request_review` and
+`workflow_run`) are left out of the gate, with their job check runs and any
+check suite that no gated run shares. They never hold or fail the gate, in any
+state. A run of that path from any other event is gated: a `cancelled` run
+passes as superseded, any other conclusion blocks and it holds the gate while
+running. A cancelled GitHub Actions check run named exactly
+`OpenCode greenkeeper signal / signal` also passes.
+`required_workflows` cannot declare those three events, so the exception cannot
+hide a declared requirement.
+
 When the Actions variable `PERSONA_REVIEW_REQUIRED` is `true`, the gate also
 requires an approval from Grumpy Engineer on the current PR head. Missing,
 stale, dismissed, and unreadable reviews block merging. Requested changes

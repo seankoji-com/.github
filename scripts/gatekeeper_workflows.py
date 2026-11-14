@@ -1,4 +1,4 @@
-"""Workflow evidence collection and gate report formatting.
+"""Workflow evidence collection, check-run selection and gate report formatting.
 
 Split out of `pr-gatekeeper.py` so the aggregator's decision logic and this
 supporting logic each stay under the size budget. The two HTTP seams it needs
@@ -26,12 +26,81 @@ EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->"
 # missing or the job times out. Its per-PR group cancels on every workflow or
 # review completion, and the canceller is a workflow_run indexed on the default
 # branch, so no newer run on the PR head ever supersedes the cancelled one.
-# A run from any other event at the same path, such as a pull_request CI job,
-# is still gated.
+# These runs, whatever their state, leave the inventory with any suite no gated
+# run shares. A run from any other event at the same path, such as a
+# pull_request CI job, is still gated under the coalescing rule below. None of
+# these events can be declared in `required_workflows`.
 ADVISORY_WORKFLOWS = {
     ".github/workflows/call-reusable-opencode-greenkeeper.yml":
         frozenset({"pull_request_target", "pull_request_review", "workflow_run"}),
 }
+
+# Coalescing control signals (#4469). The OpenCode greenkeeper caller keeps only
+# the newest signal per pull request (`cancel-in-progress: true` on a
+# PR-numbered group), so every superseded signal ends as `cancelled` by design.
+# That workflow validates nothing: it checks out no code, every step is
+# `continue-on-error`, the controller re-reads the pull request when it acts and
+# the private schedule reconciles whatever a signal missed. Counting the
+# cancellation reported an otherwise valid head as failing - permanently, since
+# a cancelled run is the last word for its event key.
+#
+# Eligibility is exact and fail-closed. Only a `cancelled` conclusion of one of
+# these paths, or of the job check run composed from the reusable's workflow and
+# job name, is treated as superseded. Any other conclusion (`failure`,
+# `timed_out`, `action_required`, a missing conclusion), any other path and any
+# other app still blocks. Outside `ADVISORY_WORKFLOWS` events the run stays in
+# the inventory, so a caller that declares the workflow in `required_workflows`
+# still has it evaluated.
+COALESCING_SIGNAL_PATHS = frozenset({
+    ".github/workflows/call-reusable-opencode-greenkeeper.yml",
+})
+COALESCING_SIGNAL_CHECK = "OpenCode greenkeeper signal / signal"
+COALESCING_SIGNAL_CHECKS = frozenset({COALESCING_SIGNAL_CHECK})
+COALESCING_SIGNAL_HINT = "Superseded by a newer coalescing signal; not required here"
+
+
+def is_coalescing_signal_path(path) -> bool:
+    """True when `path` names a workflow this gate treats as a control signal."""
+    return isinstance(path, str) and path.split("@", 1)[0] in COALESCING_SIGNAL_PATHS
+
+
+def _latest_key(run: dict) -> tuple:
+    """Ordering used to pick the surviving run of a duplicated (app, name).
+
+    `filter=latest` is meant to do this server-side, but it is pinned rather
+    than relied on: the re-run case is the one that pins the gate red.
+    """
+    return (
+        run.get("started_at") or "",
+        run.get("completed_at") or "",
+        run.get("id") or 0,
+    )
+
+
+def dedupe_check_runs(check_runs: list[dict], gate_check_name: str, actions_app_id: int,
+                      advisory_names: frozenset) -> list[dict]:
+    """Drop the gate's own and advisory runs, then keep one run per (app.id, name)."""
+    latest: dict[tuple, dict] = {}
+    for run in check_runs:
+        name = run.get("name") or ""
+        if name == gate_check_name:
+            continue
+        app = run.get("app") or {}
+        if name in advisory_names and app.get("id") == actions_app_id:
+            continue
+        # A superseded coalescing control signal (#4469): the producer cancels
+        # every signal a newer one replaces, so `cancelled` here records a lost
+        # queue position, not a failed check. Only that exact conclusion is
+        # excused; a failure, timeout or any other conclusion on the same job
+        # still blocks, and every other check is unaffected.
+        if (name in COALESCING_SIGNAL_CHECKS and app.get("id") == actions_app_id
+                and run.get("conclusion") == "cancelled"):
+            continue
+        key = (app.get("id"), (run.get("check_suite") or {}).get("id"), name)
+        current = latest.get(key)
+        if current is None or _latest_key(run) >= _latest_key(current):
+            latest[key] = run
+    return sorted(latest.values(), key=lambda r: (r.get("name") or "", r.get("id") or 0))
 
 
 class WorkflowInventoryDrift(ValueError):
@@ -105,12 +174,26 @@ def _collect_workflow_checks(get, batch_fn, repo: str, sha: str, token: str,
     def label(value):
         return " ".join(str(value).split())[:100]
 
-    checks = [{"id": run["id"],
-             "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); run {run['id']}. "
-                      "Resolve pending execution/approval or rerun unsuccessful runs"),
-             "html_url": f"https://github.com/{repo}/actions/runs/{run['id']}",
-             "status": run.get("status"), "conclusion": run.get("conclusion")}
-            for key, (_, run) in latest.items()]
+    def published_check(key, run):
+        """Report the surviving run, normalising a superseded control signal.
+
+        A coalescing signal that lost its place carries no verdict, so it is
+        published as `skipped` (passing) with the reason in its label rather
+        than as `cancelled`, which the conclusion allowlist blocks. Every other
+        conclusion is reported exactly as GitHub recorded it.
+        """
+        hint = "Resolve pending execution/approval or rerun unsuccessful runs"
+        conclusion = run.get("conclusion")
+        if conclusion == "cancelled" and is_coalescing_signal_path(run["path"]):
+            conclusion = "skipped"
+            hint = COALESCING_SIGNAL_HINT
+        return {"id": run["id"],
+                "name": (f"Workflow {label(run['path'])} ({label(key[1])}, {label(key[2])}); run {run['id']}. "
+                         f"{hint}"),
+                "html_url": f"https://github.com/{repo}/actions/runs/{run['id']}",
+                "status": run.get("status"), "conclusion": conclusion}
+
+    checks = [published_check(key, run) for key, (_, run) in latest.items()]
     # A suite any gated run still selects is never dropped.
     return checks, (known_suites | advisory_suites) - selected_suites
 

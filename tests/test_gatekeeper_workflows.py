@@ -69,6 +69,94 @@ class WorkflowInventoryTests(unittest.TestCase):
         self.assertEqual(self.verdict([workflow(run_attempt=2, status="queued", conclusion=None)]),
                          ("in_progress", None))
 
+    def inventory(self, runs):
+        with patch.object(pr_gatekeeper, "_get", return_value={"workflow_runs": runs, "total_count": len(runs)}):
+            return pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token")
+
+    def test_a_coalesced_signal_cancellation_is_superseded_not_failed(self):
+        # #4469: the greenkeeper caller cancels every signal a newer one
+        # replaces, so a cancelled run of that exact caller reports a lost queue
+        # position rather than a failed check. Counting it pinned otherwise
+        # valid heads red for the rest of the commit's life.
+        path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        checks, _ = self.inventory([workflow(path=path, conclusion="cancelled")])
+        self.assertEqual(checks[0]["conclusion"], "skipped")
+        self.assertIn(pr_gatekeeper.workflows.COALESCING_SIGNAL_HINT, checks[0]["name"])
+        self.assertIn("rerun unsuccessful runs", self.inventory([workflow()])[0][0]["name"])
+        self.assertEqual(pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2],
+                         ("completed", "success"))
+
+    def test_a_coalesced_signal_still_blocks_on_every_other_conclusion(self):
+        path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        for conclusion in ("failure", "timed_out", "action_required", None):
+            with self.subTest(conclusion=conclusion):
+                checks, _ = self.inventory([workflow(path=path, conclusion=conclusion)])
+                self.assertEqual(checks[0]["conclusion"], conclusion)
+                self.assertEqual(pr_gatekeeper.evaluate(checks, EMPTY_STATUSES, [])[:2],
+                                 ("completed", "failure"))
+
+    def test_only_the_exact_coalescing_path_is_eligible(self):
+        for path in (".github/workflows/call-reusable-opencode-greenkeeper-copy.yml",
+                     ".github/workflows/opencode-greenkeeper.yml",
+                     ".github/workflows/call-reusable-pr-gatekeeper-copy.yml"):
+            with self.subTest(path=path):
+                self.assertEqual(self.verdict([workflow(path=path, conclusion="cancelled")]),
+                                 ("completed", "failure"))
+
+    def test_a_pending_coalescing_signal_still_holds_the_gate(self):
+        path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        self.assertEqual(self.verdict([workflow(path=path, status="queued", conclusion=None)]),
+                         ("in_progress", None))
+
+    def test_a_declared_coalescing_signal_is_still_evaluated(self):
+        # The normalisation is for the published verdict only: a caller that
+        # declares the workflow required still reads the raw run from the
+        # inventory, so the exemption cannot be used to skip a real requirement.
+        path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        inventory = {}
+        with patch.object(pr_gatekeeper, "_get", return_value={
+                "workflow_runs": [workflow(path=path, conclusion="cancelled")], "total_count": 1}):
+            pr_gatekeeper.collect_workflow_checks("org/repo", "head", "token", inventory)
+        self.assertEqual([run["conclusion"] for run in inventory["head"]], ["cancelled"])
+
+    def test_a_coalesced_signal_head_with_green_validation_passes(self):
+        # The reported #4469 shape: a valid head whose validation all passed,
+        # where the only red entries are a cancelled greenkeeper signal run and
+        # the cancelled job inside it. The gate counted both, reported "2 checks
+        # failing", and nothing later replaced them because the signal is the
+        # last run for its event key.
+        # pull_request_target is dropped by the advisory rule; pull_request
+        # keeps the run and exercises the coalescing rule end to end.
+        signal_path = ".github/workflows/call-reusable-opencode-greenkeeper.yml"
+        for event in ("pull_request_target", "pull_request"):
+            with self.subTest(event=event):
+                runs = [workflow(ident=1, workflow_id=10, check_suite_id=100),
+                        workflow(ident=2, workflow_id=30, path=signal_path, event=event,
+                                 check_suite_id=101, conclusion="cancelled")]
+                checks = [{"id": 1, "name": "build", "check_suite": {"id": 100},
+                           "status": "completed", "conclusion": "success"},
+                          {"id": 2, "name": "OpenCode greenkeeper signal / signal",
+                           "check_suite": {"id": 101}, "app": {"id": pr_gatekeeper.GATE_APP_ID},
+                           "status": "completed", "conclusion": "cancelled"}]
+                suites = [{"id": 100, "status": "completed", "latest_check_runs_count": 1},
+                          {"id": 101, "status": "completed", "latest_check_runs_count": 1}]
+                with patch.object(pr_gatekeeper, "_get", side_effect=inventory_responses([
+                        {"check_runs": checks}, EMPTY_STATUSES, {"check_suites": suites},
+                        {"workflow_runs": runs, "total_count": len(runs)}])):
+                    status, conclusion, title, summary = pr_gatekeeper.evaluate(
+                        *pr_gatekeeper.collect("org/repo", "head", "token"))
+                self.assertEqual((status, conclusion), ("completed", "success"), summary)
+                self.assertEqual(title, "All checks passed")
+                # A genuine failure in the same snapshot still wins.
+                runs[0] = workflow(ident=1, workflow_id=10, check_suite_id=100, conclusion="failure")
+                with patch.object(pr_gatekeeper, "_get", side_effect=inventory_responses([
+                        {"check_runs": checks}, EMPTY_STATUSES, {"check_suites": suites},
+                        {"workflow_runs": runs, "total_count": len(runs)}])):
+                    status, conclusion, title, summary = pr_gatekeeper.evaluate(
+                        *pr_gatekeeper.collect("org/repo", "head", "token"))
+                self.assertEqual((status, conclusion), ("completed", "failure"))
+                self.assertIn("test.yml", summary)
+
     def test_old_heads_are_ignored_but_distinct_events_and_workflows_are_not(self):
         self.assertEqual(self.verdict([workflow(head_sha="old", conclusion="cancelled"), workflow(ident=2)]),
                          ("completed", "success"))
@@ -240,17 +328,26 @@ class WorkflowInventoryTests(unittest.TestCase):
                                      ("in_progress", None))
 
     def test_greenkeeper_path_from_another_event_or_other_path_still_gates(self):
+        # Outside the advisory events only the coalescing rule applies: a
+        # cancellation at the exact path passes as superseded, nothing else.
         for run in (self.greenkeeper(event="pull_request", conclusion="failure"),
-                    self.greenkeeper(event="push", conclusion="cancelled"),
+                    self.greenkeeper(event="push", conclusion="timed_out"),
                     self.greenkeeper(path=".github/workflows/opencode-greenkeeper.yml", conclusion="cancelled"),
                     self.greenkeeper(name="OpenCode greenkeeper signal",
                                      path=".github/workflows/ci.yml", conclusion="failure")):
             with self.subTest(event=run["event"], path=run["path"]):
                 self.assertEqual(self.verdict([run, workflow()]), ("completed", "failure"))
+        for event in ("pull_request", "push"):
+            with self.subTest(event=event):
+                self.assertEqual(self.verdict([self.greenkeeper(event=event, status="queued", conclusion=None),
+                                               workflow()]), ("in_progress", None))
+                checks, _ = self.inventory([self.greenkeeper(event=event, conclusion="cancelled"), workflow()])
+                self.assertEqual([c["conclusion"] for c in checks], ["skipped", "success"])
+                self.assertIn(pr_gatekeeper.workflows.COALESCING_SIGNAL_HINT, checks[0]["name"])
 
     def test_cancelled_greenkeeper_check_run_and_suite_are_dropped_on_the_head(self):
-        # tenoncall PR #260: a cancelled pull_request_target signal with its
-        # `signal / signal` job, beside green CI.
+        # A cancelled pull_request_target signal with its `signal / signal`
+        # job, beside green CI.
         for ci in ("success", "failure"):
             with self.subTest(ci=ci):
                 runs = [self.greenkeeper(conclusion="cancelled"),
@@ -268,6 +365,15 @@ class WorkflowInventoryTests(unittest.TestCase):
                 self.assertEqual([c.get("name") for c in collected[0] if c.get("check_suite")], ["test"])
                 self.assertEqual([s["id"] for s in collected[2]], [102])
                 self.assertEqual(pr_gatekeeper.evaluate(*collected)[1], "failure" if ci == "failure" else "success")
+
+    def test_advisory_events_cannot_be_declared_required(self):
+        # Dropping these runs from the inventory cannot hide a declared requirement.
+        for path, events in pr_gatekeeper.workflows.ADVISORY_WORKFLOWS.items():
+            self.assertIn(path, pr_gatekeeper.workflows.COALESCING_SIGNAL_PATHS)
+            for event in events:
+                with self.subTest(event=event), self.assertRaises(ValueError):
+                    pr_gatekeeper.workflows.parse_required_workflows(
+                        json.dumps([{"path": path, "event": event, "ref": "head"}]))
 
     def test_greenkeeper_suite_shared_with_a_gated_run_is_kept(self):
         runs = [self.greenkeeper(conclusion="cancelled"),

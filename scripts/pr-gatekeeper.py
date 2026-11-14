@@ -71,6 +71,9 @@ GATE_APP_ID = 15368  # GitHub Actions app; the only summary we trust for dispatc
 # by exact name and the Actions app, not by the gate's check suite, so an
 # unrelated job can never be skipped by sharing a suite with the gate.
 ADVISORY_CHECK_NAMES = frozenset({"recover-persona / request"})
+# The coalescing control signal's job check-run name (#4469). Its cancelled
+# conclusion is superseded by design, so it never blocks.
+COALESCING_SIGNAL_CHECK = workflows.COALESCING_SIGNAL_CHECK
 PERSONA_USER_ID = 283599686  # bot-grumpy-engineer[bot]
 PERSONA_CHECK_NAME = "persona / grumpy-engineer"
 PERSONA_STATE_RE = re.compile(
@@ -90,35 +93,9 @@ PASSING_STATUS_STATES = frozenset({"success"})
 PENDING_STATUS_STATES = frozenset({"pending"})
 
 
-def _latest_key(run: dict) -> tuple:
-    """Ordering used to pick the surviving run of a duplicated (app, name).
-
-    `filter=latest` is meant to do this server-side, but it is pinned rather
-    than relied on: the re-run case is the one that pins the gate red.
-    """
-    return (
-        run.get("started_at") or "",
-        run.get("completed_at") or "",
-        run.get("id") or 0,
-    )
-
-
 def dedupe_check_runs(check_runs: list[dict]) -> list[dict]:
     """Drop the gate's own and advisory runs, then keep one run per (app.id, name)."""
-    latest: dict[tuple, dict] = {}
-    for run in check_runs:
-        name = run.get("name") or ""
-        if name == GATE_CHECK_NAME:
-            continue
-        app = run.get("app") or {}
-        if name in ADVISORY_CHECK_NAMES and app.get("id") == GATE_APP_ID:
-            continue
-        key = (app.get("id"), (run.get("check_suite") or {}).get("id"), name)
-        current = latest.get(key)
-        if current is None or _latest_key(run) >= _latest_key(current):
-            latest[key] = run
-    return sorted(latest.values(), key=lambda r: (r.get("name") or "", r.get("id") or 0))
-
+    return workflows.dedupe_check_runs(check_runs, GATE_CHECK_NAME, GATE_APP_ID, ADVISORY_CHECK_NAMES)
 
 
 def evaluate(
