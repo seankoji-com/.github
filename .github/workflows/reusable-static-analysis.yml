@@ -4,11 +4,17 @@ name: Reusable Static Analysis
 # labels override routing. Private omissions use the private-only org variable;
 # public repositories keep the GitHub-hosted fallback.
 #
-# Non-blocking by design: both the install and scan step in each job carry
-# `continue-on-error: true`, so a tool failure never turns the check run red.
-# Each job's final `if: always()` step records PASS/SCANNED vs.
-# INSTALL-FAILED/NO-OUTPUT in the step summary so an install failure can never
-# look identical to a clean scan with no findings.
+# Non-blocking by design: the checkout, install and scan steps in each job carry
+# `continue-on-error: true`, so a tool or runner failure never turns the check
+# run red. A failed checkout skips everything after it, so an empty or partial
+# workspace is never scanned. Each job's final `if: always()` step records
+# SCANNED vs. CHECKOUT-FAILED or INSTALL-FAILED/NO-OUTPUT in the step summary,
+# so an infrastructure failure can never look identical to a clean scan with no
+# findings.
+#
+# Checkout allows 10 minutes. Self-hosted runners that cannot reuse their
+# workdir must re-clone from scratch, which exceeded the old 2-minute cap even
+# for a depth-1 fetch.
 
 on:
   workflow_call:
@@ -42,10 +48,12 @@ jobs:
   semgrep:
     name: semgrep
     runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout
-        timeout-minutes: 2
+        id: checkout
+        continue-on-error: true
+        timeout-minutes: 10
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -54,6 +62,7 @@ jobs:
       # Fresh venvs isolate scanners; the cache stores downloads, never executables.
       - name: Prepare isolated Python environment
         id: python
+        if: steps.checkout.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 1
         shell: bash
@@ -136,6 +145,7 @@ jobs:
         timeout-minutes: 1
         if: always()
         env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
           RESULT_FILE: ${{ steps.python.outputs.result }}
@@ -146,7 +156,9 @@ jobs:
           fi
           {
             echo "### Semgrep"
-            if [ -n "$count" ]; then
+            if [ "$CHECKOUT_OUTCOME" != success ]; then
+              echo "- CHECKOUT-FAILED: checkout=$CHECKOUT_OUTCOME; scan did not run; inspect logs"
+            elif [ -n "$count" ]; then
               echo "- SCANNED: $count finding(s); scan outcome: $SCAN_OUTCOME"
             else
               echo "- INSTALL-FAILED or NO-OUTPUT: install=$INSTALL_OUTCOME scan=$SCAN_OUTCOME; inspect logs"
@@ -179,16 +191,19 @@ jobs:
   zizmor:
     name: zizmor
     runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Checkout
-        timeout-minutes: 2
+        id: checkout
+        continue-on-error: true
+        timeout-minutes: 10
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Prepare isolated Python environment
         id: python
+        if: steps.checkout.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 1
         shell: bash
@@ -272,6 +287,7 @@ jobs:
         timeout-minutes: 1
         if: always()
         env:
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           SCAN_OUTCOME: ${{ steps.scan.outcome }}
           RESULT_FILE: ${{ steps.python.outputs.result }}
@@ -282,7 +298,9 @@ jobs:
           fi
           {
             echo "### zizmor"
-            if [ -n "$count" ]; then
+            if [ "$CHECKOUT_OUTCOME" != success ]; then
+              echo "- CHECKOUT-FAILED: checkout=$CHECKOUT_OUTCOME; scan did not run; inspect logs"
+            elif [ -n "$count" ]; then
               echo "- SCANNED: $count finding(s); scan outcome: $SCAN_OUTCOME"
             else
               echo "- INSTALL-FAILED or NO-OUTPUT: install=$INSTALL_OUTCOME scan=$SCAN_OUTCOME; inspect logs"

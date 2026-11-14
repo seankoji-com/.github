@@ -119,6 +119,30 @@ class ScannerInstallerTests(unittest.TestCase):
                     self.assertGreater(step["timeout-minutes"], 0)
                     self.assertLess(step["timeout-minutes"], job["timeout-minutes"])
 
+    def test_checkout_failure_is_advisory_and_never_scans_partial_workspace(self):
+        for tool, job in self.jobs.items():
+            with self.subTest(tool=tool):
+                steps = job["steps"]
+                checkout = steps[0]
+                self.assertEqual(checkout["id"], "checkout")
+                self.assertIn("actions/checkout@", checkout["uses"])
+                # A runner that cannot reuse its workdir re-clones; that is an
+                # infrastructure fault, so it must not turn the gatekeeper red.
+                self.assertTrue(checkout["continue-on-error"])
+                self.assertFalse(checkout["with"]["persist-credentials"])
+                self.assertGreater(checkout["timeout-minutes"], 2)
+                self.assertLess(checkout["timeout-minutes"], job["timeout-minutes"])
+                # Nothing may run against an empty or partial checkout.
+                python = next(s for s in steps if s.get("id") == "python")
+                self.assertEqual(python["if"], "steps.checkout.outcome == 'success'")
+                # The summary must say the scan did not run, never look clean.
+                record = next(s for s in steps if s.get("name") == "Record scan outcome")
+                self.assertEqual(record["if"], "always()")
+                self.assertEqual(record["env"]["CHECKOUT_OUTCOME"], "${{ steps.checkout.outcome }}")
+                self.assertIn('"$CHECKOUT_OUTCOME" != success', record["run"])
+                self.assertIn("CHECKOUT-FAILED", record["run"])
+                self.assertIn("scan did not run", record["run"])
+
     def test_install_scan_leave_overhead_and_cache_excludes_environments(self):
         for tool, job in self.jobs.items():
             caps = sum(s["timeout-minutes"] for s in job["steps"]
@@ -197,22 +221,28 @@ class ScannerInstallerTests(unittest.TestCase):
             artifact = next(s for s in job["steps"] if s["name"] == "Upload results artifact")
             self.assertEqual(artifact["with"]["path"], "${{ steps.python.outputs.result }}")
             self.assertIn("steps.install.outcome == 'success'", artifact["if"])
-            for install, scan, output, expected in (
-                ("failure", "success", [{"finding": True}], "NO-OUTPUT"),
-                ("", "", [], "NO-OUTPUT"),
-                ("success", "", [], "NO-OUTPUT"),
-                ("success", "skipped", [], "NO-OUTPUT"),
-                ("cancelled", "success", [], "NO-OUTPUT"),
-                ("success", "cancelled", [], "NO-OUTPUT"),
-                ("failure", "failure", [], "NO-OUTPUT"),
-                ("success", "success", None, "NO-OUTPUT"),
-                ("success", "failure", None, "NO-OUTPUT"),
-                ("success", "failure", "malformed", "NO-OUTPUT"),
-                ("success", "success", {"bad": 1}, "NO-OUTPUT"),
-                ("success", "success", [], "SCANNED: 0"),
-                ("success", "failure", [{"finding": True}], "SCANNED: 1"),
+            for checkout, install, scan, output, expected in (
+                ("success", "failure", "success", [{"finding": True}], "NO-OUTPUT"),
+                ("success", "", "", [], "NO-OUTPUT"),
+                ("success", "success", "", [], "NO-OUTPUT"),
+                ("success", "success", "skipped", [], "NO-OUTPUT"),
+                ("success", "cancelled", "success", [], "NO-OUTPUT"),
+                ("success", "success", "cancelled", [], "NO-OUTPUT"),
+                ("success", "failure", "failure", [], "NO-OUTPUT"),
+                ("success", "success", "success", None, "NO-OUTPUT"),
+                ("success", "success", "failure", None, "NO-OUTPUT"),
+                ("success", "success", "failure", "malformed", "NO-OUTPUT"),
+                ("success", "success", "success", {"bad": 1}, "NO-OUTPUT"),
+                ("success", "success", "success", [], "SCANNED: 0"),
+                ("success", "success", "failure", [{"finding": True}], "SCANNED: 1"),
+                # A failed or missing checkout outcome never reports a scan,
+                # even if stale output from an earlier run is present.
+                ("failure", "skipped", "skipped", [], "CHECKOUT-FAILED"),
+                ("failure", "success", "success", [{"finding": True}], "CHECKOUT-FAILED"),
+                ("cancelled", "skipped", "skipped", [], "CHECKOUT-FAILED"),
+                ("", "success", "success", [], "CHECKOUT-FAILED"),
             ):
-                with self.subTest(tool=tool, install=install, scan=scan, output=output):
+                with self.subTest(tool=tool, checkout=checkout, install=install, scan=scan, output=output):
                     with tempfile.TemporaryDirectory() as directory:
                         root = Path(directory)
                         (root / f"{tool}-results.json").write_text('{"results": []}' if tool == "semgrep" else '[]')
@@ -225,15 +255,17 @@ class ScannerInstallerTests(unittest.TestCase):
                                 fresh.write_text(json.dumps({"results": output} if tool == "semgrep" else output))
                         summary = root / "summary"
                         result = subprocess.run(["bash", "-c", summary_step["run"]], cwd=root,
-                            env={**os.environ, "INSTALL_OUTCOME": install, "SCAN_OUTCOME": scan,
+                            env={**os.environ, "CHECKOUT_OUTCOME": checkout,
+                                 "INSTALL_OUTCOME": install, "SCAN_OUTCOME": scan,
                                  "RESULT_FILE": str(fresh), "GITHUB_STEP_SUMMARY": str(summary)},
                             capture_output=True, text=True, timeout=5)
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        expected_line = (
-                            f"- INSTALL-FAILED or NO-OUTPUT: install={install} scan={scan}; inspect logs"
-                            if expected == "NO-OUTPUT" else
-                            f"- SCANNED: {len(output)} finding(s); scan outcome: {scan}"
-                        )
+                        if expected == "CHECKOUT-FAILED":
+                            expected_line = f"- CHECKOUT-FAILED: checkout={checkout}; scan did not run; inspect logs"
+                        elif expected == "NO-OUTPUT":
+                            expected_line = f"- INSTALL-FAILED or NO-OUTPUT: install={install} scan={scan}; inspect logs"
+                        else:
+                            expected_line = f"- SCANNED: {len(output)} finding(s); scan outcome: {scan}"
                         self.assertEqual(
                             [line for line in summary.read_text().splitlines() if line.startswith("- ")],
                             [expected_line],
