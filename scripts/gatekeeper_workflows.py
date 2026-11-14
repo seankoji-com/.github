@@ -20,6 +20,18 @@ import urllib.parse
 # The gate's own caller workflow. Its run must never be inventoried or required.
 GATE_WORKFLOW_PATH = ".github/workflows/call-reusable-pr-gatekeeper.yml"
 EVALUATED_MARKER = "<!-- gatekeeper-evaluated -->"
+# Notification-only callers, by path and the events that caller declares. The
+# greenkeeper signal checks no code and its steps stay green on any dispatch
+# failure, so its runs only go red when concurrency cancels them, a runner is
+# missing or the job times out. Its per-PR group cancels on every workflow or
+# review completion, and the canceller is a workflow_run indexed on the default
+# branch, so no newer run on the PR head ever supersedes the cancelled one.
+# A run from any other event at the same path, such as a pull_request CI job,
+# is still gated.
+ADVISORY_WORKFLOWS = {
+    ".github/workflows/call-reusable-opencode-greenkeeper.yml":
+        frozenset({"pull_request_target", "pull_request_review", "workflow_run"}),
+}
 
 
 class WorkflowInventoryDrift(ValueError):
@@ -42,6 +54,7 @@ def _collect_workflow_checks(get, batch_fn, repo: str, sha: str, token: str,
     """Include registered workflows before they create their first check run."""
     latest = {}
     known_suites = set()
+    advisory_suites = set()
     seen_runs = set()
     expected_count = None
     page = 1
@@ -70,6 +83,11 @@ def _collect_workflow_checks(get, batch_fn, repo: str, sha: str, token: str,
             if (str(run["id"]) == os.environ.get("GITHUB_RUN_ID")
                     or path.split("@", 1)[0] == GATE_WORKFLOW_PATH):
                 continue
+            if run.get("event") in ADVISORY_WORKFLOWS.get(path.split("@", 1)[0], ()):
+                # Drop its job check runs and suite too, not only the run.
+                if isinstance(run.get("check_suite_id"), int):
+                    advisory_suites.add(run["check_suite_id"])
+                continue
             if isinstance(run.get("check_suite_id"), int):
                 known_suites.add(run["check_suite_id"])
             key = (run["workflow_id"], run.get("event"), run.get("head_branch"))
@@ -93,7 +111,8 @@ def _collect_workflow_checks(get, batch_fn, repo: str, sha: str, token: str,
              "html_url": f"https://github.com/{repo}/actions/runs/{run['id']}",
              "status": run.get("status"), "conclusion": run.get("conclusion")}
             for key, (_, run) in latest.items()]
-    return checks, known_suites - selected_suites
+    # A suite any gated run still selects is never dropped.
+    return checks, (known_suites | advisory_suites) - selected_suites
 
 
 def _check_runs(get, batch_fn, repo, ref, token):
@@ -174,6 +193,7 @@ def collect_for_ref(get, batch_fn, repo: str, ref: str, token: str, *,
         get, batch_fn, repo, workflow_sha or ref, token, inventory)
     # A new workflow run on the same SHA can replace a canceled older suite.
     # Keep suites from distinct workflows, even when their job names match.
+    # Advisory notification suites are dropped the same way.
     runs = [run for run in runs if (run.get("check_suite") or {}).get("id") not in superseded_suites]
     suites = [suite for suite in suites if suite.get("id") not in superseded_suites]
     runs.extend(workflow_checks)

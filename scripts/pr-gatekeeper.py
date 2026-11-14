@@ -25,7 +25,8 @@ Four payloads are read, and each is load-bearing:
     would block every PR in the org forever.
   * `/actions/runs?head_sha={sha}` — workflows can be queued before any jobs
     exist. Their latest runs must finish too; zero-job external app suites
-    remain ignored. The gatekeeper workflow itself is excluded.
+    remain ignored. The gatekeeper workflow itself is excluded, and so are the
+    notification-only callers in `gatekeeper_workflows.ADVISORY_WORKFLOWS`.
 
 `conclusion` is None unless `status == "completed"`. `in_progress` is a check
 run *status*; supplying any conclusion forces `status: completed`, so
