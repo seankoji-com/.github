@@ -26,6 +26,7 @@ class PersonaCompositeTests(unittest.TestCase):
         self.assertEqual(steps[1]["env"]["PERSONA_SCRIPT"], "${{ github.action_path }}/publish.py")
         self.assertTrue(action["inputs"]["publisher_bot_id"]["required"])
         self.assertTrue(action["inputs"]["token"]["required"])
+        self.assertNotIn("context", action["inputs"])
 
     def test_mask_precedes_publisher_and_escapes_commands(self):
         steps = yaml.safe_load((ROOT / "actions/persona-status/action.yml").read_text())["runs"]["steps"]

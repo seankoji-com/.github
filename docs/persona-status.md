@@ -62,6 +62,9 @@ deployment must verify the actual App-bound required rule; there is no
 `GITHUB_TOKEN` fallback. The action masks its token before invoking the CLI.
 Direct CLI callers must mask the token at their trusted mint boundary as well.
 No credentials, raw reviews, request headers or API response bodies enter logs.
+The context is fixed in code, not a CLI or action input. GitHub's status-write
+permission itself permits other context names, so deployment must also verify
+the intended CI source binding against a compromised or misconfigured writer.
 
 ## Results, bounds and invalidation
 
@@ -70,7 +73,9 @@ The action reads current PRs and reviews before any certificate reuse. Its fixed
 digest covers policy/action bytes, head, current PR membership and selected
 review IDs/states. Duplicate intents with matching current state need no writes.
 A new success first publishes pending to verify its returned publisher identity,
-then re-reads reviews. Every final write is read back and checked against another
+then re-reads reviews. Readback uses the reverse-chronological status list, which
+includes creators; the combined-status response omits creator identity. Every
+final write is read back and checked against another
 current snapshot. Changed snapshots retry at most three passes. This is not an
 atomic review-read-and-status transaction.
 

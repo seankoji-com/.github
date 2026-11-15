@@ -76,7 +76,10 @@ class GitHub:
             latest = {}
             for status in sorted(self.statuses, key=lambda s: s["id"], reverse=True):
                 latest.setdefault(status["context"].casefold(), status)
-            data = list(latest.values())
+            # GitHub's Simple Commit Status omits creator. Only the list/create
+            # schemas contain identity: do not make this fixture over-permissive.
+            data = [{k: v for k, v in status.items() if k != "creator"}
+                    for status in latest.values()]
             return {"sha": HEAD, "statuses": copy.deepcopy(data[(page - 1) * 100:page * 100])}
         else:
             raise AssertionError("unexpected fixture endpoint")
@@ -104,6 +107,21 @@ class PersonaTests(unittest.TestCase):
                 self.assertTrue(result["status_verified"])
                 self.assertEqual(api.posts[-1]["state"], state)
                 self.assertEqual({p["context"] for p in api.posts}, {persona.CONTEXT})
+
+    def test_schema_accurate_creator_readback_and_repeat_error_dedup(self):
+        api = GitHub()
+        result, code = self.publisher(api).run()
+        self.assertEqual((result["state"], code), ("success", 0))
+        self.assertTrue(result["status_verified"])
+        combined = api.request("/repos/" + REPO + "/commits/" + HEAD + "/status")
+        self.assertNotIn("creator", combined["statuses"][0])
+        self.assertFalse(any("/status?" in path for path in api.reads))
+        api.reviews[1] = [review(2, "CHANGES_REQUESTED")]
+        result, code = self.publisher(api).run()
+        self.assertEqual((result["state"], code), ("failure", 0))
+        count = len(api.posts)
+        self.publisher(api).run()
+        self.assertEqual(len(api.posts), count)
 
     def test_latest_submission_and_paginated_reviews_control_verdict(self):
         api = GitHub()
@@ -273,7 +291,7 @@ class PersonaTests(unittest.TestCase):
             self.assertEqual(bool(api.posts), not dry)
 
     def test_malformed_review_metadata_never_certifies_success(self):
-        for item in ({**review(), "submitted_at": "bad-time"}, {**review(), "user": None},
+        for item in ({**review(), "submitted_at": "bad-time"}, {**review(), "user": "malformed"},
                      {**review(), "state": "UNKNOWN"}):
             api = GitHub()
             api.reviews[1] = [item]
@@ -281,19 +299,27 @@ class PersonaTests(unittest.TestCase):
             self.assertEqual((result["state"], code), ("error", 2))
             self.assertNotIn("success", [p["state"] for p in api.posts])
 
+    def test_nullable_deleted_review_author_cannot_approve_or_block_bot(self):
+        api = GitHub()
+        deleted = {**review(99, "CHANGES_REQUESTED"), "user": None}
+        api.reviews[1] = [deleted, review()]
+        self.assertEqual(self.publisher(api).run()[0]["state"], "success")
+        api.reviews[1] = [deleted]
+        self.assertEqual(self.publisher(api).run()[0]["state"], "pending")
+
     def test_malformed_readback_cannot_leave_reported_success(self):
-        for fault in ("creator", "head", "id"):
+        for fault in ("creator", "other_id", "id"):
             api = GitHub()
             request = api.request
             def corrupt(path, body=None):
                 data = request(path, body)
-                if "/status?" in path and body is None:
+                if "/statuses?" in path and body is None and api.posts and api.posts[-1]["state"] == "success":
                     if fault == "creator":
-                        data["statuses"][0]["creator"] = "invalid"
-                    elif fault == "head":
-                        data["sha"] = NEXT
+                        data[0]["creator"] = "invalid"
+                    elif fault == "other_id":
+                        data[0]["id"] += 100
                     else:
-                        data["statuses"][0]["id"] = 0
+                        data[0]["id"] = 0
                 return data
             api.request = corrupt
             result, code = self.publisher(api).run()
@@ -356,6 +382,14 @@ class PersonaTests(unittest.TestCase):
              patch.object(persona, "API", side_effect=AssertionError("API must not be called")), \
              contextlib.redirect_stdout(io.StringIO()) as output:
             code = persona.main(["--dry-run", "TRUE"])
+        self.assertEqual(code, 2)
+        self.assertEqual(json.loads(output.getvalue())["reason"], "invalid_setup")
+
+    def test_cli_rejects_dynamic_context_before_api_use(self):
+        with patch.dict(os.environ, {"GITHUB_OUTPUT": ""}), \
+             patch.object(persona, "API", side_effect=AssertionError("API must not be called")), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            code = persona.main(["--context", "gatekeeper / all-checks-passed"])
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(output.getvalue())["reason"], "invalid_setup")
 

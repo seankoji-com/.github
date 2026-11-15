@@ -111,7 +111,13 @@ class API:
 def selected_review(reviews, head):
     choices = []
     for review in reviews:
+        if "user" not in review:
+            raise Unverified("invalid_review_actor")
         actor = review.get("user")
+        # The REST review schema uses nullable-simple-user. A deleted account
+        # cannot establish the required bot identity and must not block others.
+        if actor is None:
+            continue
         if not isinstance(actor, dict):
             raise Unverified("invalid_review_actor")
         if actor.get("id") != REVIEWER_ID or actor.get("type") != "Bot":
@@ -258,31 +264,31 @@ class Publisher:
         raise Unverified("status_history_budget")
 
     def readback(self):
-        # Combined statuses contain the latest record per context. They do not
-        # replace the full, all-creator history count used for the cap guard.
+        # List responses include creator; combined Simple Commit Status records
+        # do not. The list is reverse chronological, so its FIRST matching
+        # context is the latest, including its authoritative creator identity.
+        # This early readback does not replace full history accounting.
         seen = set()
         for page in range(1, HISTORY_PAGES + 1):
             data = self.status_request(self.root + "/commits/" + self.t.head
-                                       + "/status?per_page=100&page=" + str(page))
-            if (not isinstance(data, dict) or data.get("sha") != self.t.head
-                    or not isinstance(data.get("statuses"), list)
-                    or len(data["statuses"]) > PAGE_SIZE):
+                                       + "/statuses?per_page=100&page=" + str(page))
+            if not isinstance(data, list) or len(data) > PAGE_SIZE:
                 raise Unverified("invalid_status_readback")
-            for status in data["statuses"]:
+            for status in data:
                 if (not isinstance(status, dict) or not positive(status.get("id"))
                         or not isinstance(status.get("context"), str)
                         or status.get("state") not in ("pending", "success", "failure", "error")):
                     raise Unverified("invalid_status_readback")
-                context = status["context"].casefold()
-                if context in seen:
+                if status["id"] in seen:
                     raise Unverified("invalid_status_readback")
-                seen.add(context)
-                if context == CONTEXT.casefold():
+                seen.add(status["id"])
+                if status["context"].casefold() == CONTEXT.casefold():
                     self.latest = status
                     return
-            if len(data["statuses"]) < PAGE_SIZE:
+            if len(data) < PAGE_SIZE:
                 self.latest = None
                 return
+        raise Unverified("status_history_budget")
 
     def matches(self, state, description):
         return (self.trusted(self.latest) and self.latest.get("state") == state
