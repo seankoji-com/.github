@@ -27,6 +27,7 @@ class RunnerRoutingTests(unittest.TestCase):
             "reusable-issue-triage.yml", "reusable-link-check.yml",
             "reusable-node-ci.yml", "reusable-opencode-greenkeeper-signal.yml",
             "reusable-pr-gatekeeper.yml",
+            "reusable-ci-result.yml",
             "reusable-shellspec.yml", "reusable-static-analysis.yml",
         }
         checked = set()
