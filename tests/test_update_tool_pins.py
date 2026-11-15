@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
@@ -267,7 +268,9 @@ class PlanTests(Sandbox):
 
 class MainTests(Sandbox):
     def test_simulated_bump_passes_scanner_workflow_contract(self):
-        import test_scanner_seed
+        spec = importlib.util.spec_from_file_location("test_scanner_seed", ROOT / "tests/test_scanner_seed.py")
+        test_scanner_seed = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(test_scanner_seed)
 
         before = utp.pins(self.root)
         code, _, err = self.run_main()
