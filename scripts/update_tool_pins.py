@@ -51,8 +51,8 @@ PIN_NAMES = (
     (TESTS, "PIN_ACTIONLINT_SHA256"),
 )
 
-STABLE = re.compile(r"\d+(?:\.\d+)+")
-OTEL_VERSION = re.compile(r"\d+(?:\.\d+)+(?:b\d+)?")
+STABLE = re.compile(r"[0-9]+(?:\.[0-9]+)+")
+OTEL_VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)+(?:b[0-9]+)?")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 OTEL_SPEC = re.compile(r"~=\s*(\d+(?:\.\d+)+(?:b\d+)?)(?![\w.])")
 
@@ -193,7 +193,7 @@ def semgrep_otel(version: str, get: Fetch) -> str:
 def actionlint_latest(get: Fetch) -> str:
     release = json.loads(get(f"https://api.github.com/repos/{ACTIONLINT_REPO}/releases/latest"))
     tag = release["tag_name"]
-    if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v\d+(\.\d+)+", tag):
+    if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v[0-9]+(\.[0-9]+)+", tag):
         raise ValueError(f"unexpected actionlint release {tag!r}")
     return tag[1:]
 

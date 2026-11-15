@@ -200,7 +200,7 @@ class ActionlintTests(unittest.TestCase):
 
     def test_rejects_prerelease_draft_and_odd_tags(self):
         for doc in ({"tag_name": "v1.8.0", "prerelease": True}, {"tag_name": "v1.8.0", "draft": True},
-                    {"tag_name": "nightly"}, {"tag_name": "v1.8.0-rc1"}):
+                    {"tag_name": "nightly"}, {"tag_name": "v1.8.0-rc1"}, {"tag_name": "v٩.٠"}):
             with self.subTest(doc=doc), self.assertRaises(ValueError):
                 self.latest(doc)
 
@@ -481,11 +481,13 @@ class ApplyReportTests(Sandbox):
         original = scanner.read_text()
         cases = (
             ("PIN_PIP", "25.2", "27.0b1", False),
+            ("PIN_PIP", "25.2", "٩٩.٠", False),
             ("PIN_PIP", "25.2", "28", False),
             ("PIN_PIP", "25.2b1", "28.0", False),
             ("PIN_ZIZMOR", "1.30.1", "2.0b1", False),
             ("PIN_SEMGREP", "1.0", "2", False),
             ("PIN_SEMGREP_OTEL", "0.58b0", "1b1", False),
+            ("PIN_SEMGREP_OTEL", "0.58b0", "٩٩.٠b١", False),
             ("PIN_SEMGREP_OTEL", "0.62b0", "0.62.0", True),
             ("PIN_SEMGREP_OTEL", "0.62.0", "0.62b1", False),
             ("PIN_SEMGREP_OTEL", "0.62b2", "0.62b1", False),
