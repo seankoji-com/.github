@@ -34,7 +34,8 @@ as two jobs, so freshly released scanner code never runs beside a write token:
    self-hosted interpreter). It never lowers a pin.
 2. `PIN_SEMGREP_OTEL` is taken from the `~=` requirement of the new Semgrep
    release. If Semgrep stops pinning one OpenTelemetry release, the Semgrep bump
-   is skipped and the run fails with the reason.
+   is skipped and the run fails with the reason. A lower or differently spelled
+   equivalent OTEL version also skips the bump and reports an error for review.
 3. `PIN_ACTIONLINT_SHA256` is the `linux_amd64` digest from the release's
    `checksums.txt`, fetched over HTTPS. It pins what was published; it does not
    authenticate the release.
@@ -48,6 +49,8 @@ as two jobs, so freshly released scanner code never runs beside a write token:
 
 6. `--apply-report` re-validates every entry (a known pin, a plain version or
    digest, the old value still current) and rewrites only those lines.
+   Versions require at least two numeric components. Ordinary tool versions
+   must be final releases; the Semgrep OTEL pin also supports a `b` beta suffix.
 7. It force-pushes `automation/tool-pins` when the content differs from the
    branch, opens or updates one PR, and dispatches `public-test.yml` on the
    branch. Every one of those writes authenticates with the org App token minted
