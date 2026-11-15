@@ -358,7 +358,8 @@ builtins.exec = fixture_exec
                         report = root / "summary"
                         report.unlink(missing_ok=True)
                         result = subprocess.run(["/bin/bash", "-c", summary["run"]],
-                            env={**env, "INSTALL_OUTCOME": "skipped", "SCAN_OUTCOME": "skipped",
+                            env={**env, "CHECKOUT_OUTCOME": "success",
+                                 "INSTALL_OUTCOME": "skipped", "SCAN_OUTCOME": "skipped",
                                  "RESULT_FILE": "", "GITHUB_STEP_SUMMARY": str(report)},
                             capture_output=True, text=True, timeout=5)
                         self.assertEqual(result.returncode, 0, result.stderr)

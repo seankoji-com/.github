@@ -121,6 +121,66 @@ class TestBlocking(unittest.TestCase):
         )
         self.assertEqual((status, conclusion), ("completed", "success"))
 
+    def test_a_superseded_coalescing_signal_does_not_block(self):
+        # #4469: the greenkeeper caller keeps one signal per pull request and
+        # cancels the rest, so a cancelled `signal` job records supersession.
+        status, conclusion, _, _ = evaluate(
+            [run(pr_gatekeeper.COALESCING_SIGNAL_CHECK, conclusion="cancelled")],
+            EMPTY_STATUSES,
+            [],
+        )
+        self.assertEqual((status, conclusion), PASSED)
+
+    def test_a_superseded_signal_cannot_hide_a_real_failure(self):
+        status, conclusion, _, summary = evaluate(
+            [
+                run(pr_gatekeeper.COALESCING_SIGNAL_CHECK, conclusion="cancelled"),
+                run("build", conclusion="failure", run_id=2),
+            ],
+            EMPTY_STATUSES,
+            [],
+        )
+        self.assertEqual((status, conclusion), FAILED)
+        self.assertIn("build", summary)
+        self.assertNotIn("greenkeeper", summary)
+
+    def test_other_conclusions_on_the_signal_check_still_block(self):
+        for bad in ("failure", "timed_out", "action_required", "stale", None):
+            with self.subTest(conclusion=bad):
+                status, conclusion, _, _ = evaluate(
+                    [run(pr_gatekeeper.COALESCING_SIGNAL_CHECK, conclusion=bad)],
+                    EMPTY_STATUSES,
+                    [],
+                )
+                self.assertEqual((status, conclusion), FAILED)
+
+    def test_only_the_actions_app_and_exact_job_name_are_eligible(self):
+        lookalikes = [
+            run(pr_gatekeeper.COALESCING_SIGNAL_CHECK, conclusion="cancelled", app_id=4242),
+            run(pr_gatekeeper.COALESCING_SIGNAL_CHECK + "-2", conclusion="cancelled"),
+            run("OpenCode greenkeeper / signal", conclusion="cancelled"),
+            run("OpenCode greenkeeper signal", conclusion="cancelled"),
+        ]
+        for candidate in lookalikes:
+            with self.subTest(name=candidate["name"], app=candidate["app"]):
+                status, conclusion, _, _ = evaluate([candidate], EMPTY_STATUSES, [])
+                self.assertEqual((status, conclusion), FAILED)
+
+    def test_the_signal_check_name_matches_the_reusable_workflow(self):
+        # The exemption is keyed by the check-run name GitHub composes from the
+        # reusable's workflow and job. Derive it here so a rename in the
+        # workflow fails this test instead of silently re-blocking every head.
+        import yaml
+        root = Path(__file__).resolve().parent.parent
+        reusable = yaml.safe_load(
+            (root / ".github/workflows/reusable-opencode-greenkeeper-signal.yml").read_text()
+        )
+        self.assertEqual([*reusable["jobs"]], ["signal"])
+        self.assertEqual([*pr_gatekeeper.workflows.COALESCING_SIGNAL_CHECKS],
+                         [f"{reusable['name']} / signal"])
+        self.assertEqual([*pr_gatekeeper.workflows.COALESCING_SIGNAL_PATHS],
+                         [".github/workflows/call-reusable-opencode-greenkeeper.yml"])
+
 
 class TestPending(unittest.TestCase):
     def test_pending_check_is_in_progress_with_no_conclusion(self):
