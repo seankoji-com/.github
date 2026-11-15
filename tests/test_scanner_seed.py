@@ -684,6 +684,24 @@ seed.immutable_original = seed.immutable
 
 
 class SourceContractTests(unittest.TestCase):
+    def test_pin_formats_match_updater_supported_versions(self):
+        document = yaml.safe_load(WORKFLOW.read_text())
+        cases = (("PIN_PIP", "30.0b1", False), ("PIN_SEMGREP", "3.0b1", False),
+                 ("PIN_ZIZMOR", "2.0b1", False), ("PIN_SEMGREP_OTEL", "0.62b0", True),
+                 ("PIN_SEMGREP_OTEL", "0.62.0", True), ("PIN_SEMGREP_OTEL", "0.62rc1", False),
+                 ("PIN_PIP", "30.0\n", False))
+        with tempfile.TemporaryDirectory() as temp:
+            workflow = Path(temp) / "workflow.yml"
+            for name, value, valid in cases:
+                with self.subTest(pin=name, value=value):
+                    changed = {**document, "env": {**document["env"], name: value}}
+                    workflow.write_text(yaml.safe_dump(changed))
+                    contract = SourceContractTests("test_complete_scopes_and_current_pins_advisory_and_hosted_isolation")
+                    with patch.object(sys.modules[__name__], "WORKFLOW", workflow):
+                        result = unittest.TestResult()
+                        contract.run(result)
+                    self.assertEqual(result.wasSuccessful(), valid, (result.failures, result.errors))
+
     def test_cache_save_actual_condition_only_allows_successful_default_pushes(self):
         for job in yaml.safe_load(WORKFLOW.read_text())["jobs"].values():
             save = next(s for s in job["steps"] if "actions/cache/save@" in s.get("uses", ""))
@@ -761,8 +779,13 @@ class SourceContractTests(unittest.TestCase):
 
     def test_complete_scopes_and_current_pins_advisory_and_hosted_isolation(self):
         document = yaml.safe_load(WORKFLOW.read_text())
-        self.assertEqual(document["env"], {"PIN_PIP": "26.2.2", "PIN_SEMGREP": "1.183.0",
-                                           "PIN_SEMGREP_OTEL": "0.58b0", "PIN_ZIZMOR": "1.30.1"})
+        self.assertEqual(set(document["env"]), {"PIN_PIP", "PIN_SEMGREP", "PIN_SEMGREP_OTEL", "PIN_ZIZMOR"})
+        for name, value in document["env"].items():
+            with self.subTest(pin=name):
+                self.assertIsInstance(value, str)
+                pattern = (r"\A[0-9]+(\.[0-9]+)+(b[0-9]+)?\Z" if name == "PIN_SEMGREP_OTEL"
+                           else r"\A[0-9]+(\.[0-9]+)*\Z")
+                self.assertRegex(value, pattern)
         self.assertEqual(document["permissions"], {"contents": "read"})
         self.assertEqual(document[True]["workflow_call"]["inputs"]["runner-json"]["default"], "")
         for tool, job in document["jobs"].items():

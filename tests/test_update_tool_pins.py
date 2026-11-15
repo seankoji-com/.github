@@ -3,14 +3,18 @@
 
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
+import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -19,6 +23,8 @@ import update_tool_pins as utp  # noqa: E402
 
 DIGEST_OLD = "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 DIGEST_NEW = "a" * 64
+FIXTURE_PINS = {"PIN_PIP": "26.2.2", "PIN_SEMGREP": "1.183.0", "PIN_SEMGREP_OTEL": "0.58b0",
+                "PIN_ZIZMOR": "1.30.1", "PIN_ACTIONLINT": "1.7.12", "PIN_ACTIONLINT_SHA256": DIGEST_OLD}
 
 
 def release(*versions, requires_python=">=3.9", yanked=()):
@@ -91,6 +97,11 @@ class Sandbox(unittest.TestCase):
             target = self.root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy(ROOT / relative, target)
+            text = target.read_text()
+            for file, name in utp.PIN_NAMES:
+                if file == relative:
+                    text = utp.set_pin(text, name, FIXTURE_PINS[name])
+            target.write_text(text)
 
     def text(self, relative):
         return (self.root / relative).read_text()
@@ -256,6 +267,22 @@ class PlanTests(Sandbox):
 
 
 class MainTests(Sandbox):
+    def test_simulated_bump_passes_scanner_workflow_contract(self):
+        spec = importlib.util.spec_from_file_location("test_scanner_seed", ROOT / "tests/test_scanner_seed.py")
+        test_scanner_seed = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(test_scanner_seed)
+
+        before = utp.pins(self.root)
+        code, _, err = self.run_main()
+        self.assertEqual((code, err), (0, ""))
+        self.assertNotEqual(utp.pins(self.root)["PIN_SEMGREP"], before["PIN_SEMGREP"])
+        contract = test_scanner_seed.SourceContractTests(
+            "test_complete_scopes_and_current_pins_advisory_and_hosted_isolation")
+        with patch.object(test_scanner_seed, "WORKFLOW", self.root / utp.SCANNERS):
+            result = unittest.TestResult()
+            contract.run(result)
+        self.assertTrue(result.wasSuccessful(), f"failures: {result.failures}; errors: {result.errors}")
+
     def test_writes_pins_in_place_then_is_idempotent(self):
         before = {f: self.text(f) for f in (utp.SCANNERS, utp.TESTS)}
         current = utp.pins(self.root)
@@ -513,6 +540,31 @@ class FetchGuardTests(unittest.TestCase):
 
 class RepositoryPinsTests(unittest.TestCase):
     """The real workflows must stay parseable by this script."""
+
+    def test_updater_scenarios_survive_each_repository_pin_change(self):
+        # Run the real scenario classes against copies whose repository pin changes.
+        # The scenario fixtures must not inherit those changing values.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for directory in ("scripts", "tests", ".github"):
+                shutil.copytree(ROOT / directory, root / directory,
+                                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            originals = {file: (root / file).read_text() for file, _ in utp.PIN_NAMES}
+            env = {**os.environ, "PYTHONPATH": str(root / "tests"), "PYTHONDONTWRITEBYTECODE": "1"}
+            for file, name in utp.PIN_NAMES:
+                with self.subTest(pin=name):
+                    path = root / file
+                    new = "f" * 64 if name.endswith("SHA256") else (
+                        "9999.0b0" if name == "PIN_SEMGREP_OTEL" else "9999.0")
+                    path.write_text(utp.set_pin(originals[file], name, new))
+                    try:
+                        result = subprocess.run(
+                            [sys.executable, "-m", "unittest", "test_update_tool_pins.PlanTests",
+                             "test_update_tool_pins.MainTests", "test_update_tool_pins.ApplyReportTests"],
+                            cwd=root, env=env, capture_output=True, text=True, timeout=60)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    finally:
+                        path.write_text(originals[file])
 
     def test_every_pin_is_defined_once_and_looks_like_a_version(self):
         found = utp.pins(ROOT)
