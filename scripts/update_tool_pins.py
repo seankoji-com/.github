@@ -51,7 +51,8 @@ PIN_NAMES = (
     (TESTS, "PIN_ACTIONLINT_SHA256"),
 )
 
-STABLE = re.compile(r"\d+(\.\d+)*")
+STABLE = re.compile(r"[0-9]+(?:\.[0-9]+)+")
+OTEL_VERSION = re.compile(r"[0-9]+(?:\.[0-9]+)+(?:b[0-9]+)?")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 OTEL_SPEC = re.compile(r"~=\s*(\d+(?:\.\d+)+(?:b\d+)?)(?![\w.])")
 
@@ -123,7 +124,18 @@ def set_pin(text: str, name: str, value: str) -> str:
 
 
 def version_key(version: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in version.split("."))
+    parts = [int(part) for part in version.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def otel_version_key(version: str) -> tuple[tuple[int, ...], tuple[int, int]]:
+    """Order the supported release and beta subset of PEP 440."""
+    if not OTEL_VERSION.fullmatch(version):
+        raise ValueError(f"unexpected OpenTelemetry version {version!r}")
+    release, separator, beta = version.partition("b")
+    return version_key(release), (0, int(beta)) if separator else (1, 0)
 
 
 def python_ok(requires_python: str | None) -> bool:
@@ -181,7 +193,7 @@ def semgrep_otel(version: str, get: Fetch) -> str:
 def actionlint_latest(get: Fetch) -> str:
     release = json.loads(get(f"https://api.github.com/repos/{ACTIONLINT_REPO}/releases/latest"))
     tag = release["tag_name"]
-    if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v\d+(\.\d+)+", tag):
+    if release.get("draft") or release.get("prerelease") or not re.fullmatch(r"v[0-9]+(\.[0-9]+)+", tag):
         raise ValueError(f"unexpected actionlint release {tag!r}")
     return tag[1:]
 
@@ -225,6 +237,8 @@ def plan(root: Path, get: Fetch) -> tuple[list[Change], list[str]]:
         otel, old_otel = semgrep_otel(new, get), current(SCANNERS, "PIN_SEMGREP_OTEL")
         result = [Change("semgrep", SCANNERS, "PIN_SEMGREP", old, new)]
         if otel != old_otel:
+            if otel_version_key(otel) <= otel_version_key(old_otel):
+                raise ValueError(f"PIN_SEMGREP_OTEL: {otel} does not raise {old_otel}")
             result.append(Change("semgrep", SCANNERS, "PIN_SEMGREP_OTEL", old_otel, otel))
         return result
 
@@ -258,13 +272,14 @@ def validate_change(change: Change, root: Path) -> None:
     """Reject anything that is not a plain pin bump for a pin this script owns."""
     if (change.file, change.name) not in PIN_NAMES:
         raise ValueError(f"unknown pin {change.file}:{change.name}")
-    pattern = SHA256 if change.name.endswith("_SHA256") else re.compile(r"\d+(\.\d+)*(b\d+)?")
+    pattern = (SHA256 if change.name.endswith("_SHA256") else
+               OTEL_VERSION if change.name == "PIN_SEMGREP_OTEL" else STABLE)
     for value in (change.old, change.new):
         if not isinstance(value, str) or not pattern.fullmatch(value):
             raise ValueError(f"{change.name}: unexpected value {value!r}")
     if not change.name.endswith("_SHA256"):
-        number = lambda v: tuple(int(n) for n in re.findall(r"\d+", v))  # noqa: E731 - 0.58b0 -> (0, 58, 0)
-        if number(change.new) <= number(change.old):
+        key = otel_version_key if change.name == "PIN_SEMGREP_OTEL" else version_key
+        if key(change.new) <= key(change.old):
             raise ValueError(f"{change.name}: {change.new} does not raise {change.old}")
     if read_pin((root / change.file).read_text(), change.name) != change.old:
         raise ValueError(f"{change.name}: pin is no longer {change.old}; rerun the update")

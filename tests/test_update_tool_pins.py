@@ -148,7 +148,7 @@ class VersionSelectionTests(unittest.TestCase):
     def test_newest_stable_skips_prereleases_yanked_and_too_new_python(self):
         releases = {
             **release("1.0", "1.9"),
-            **release("2.0rc1", "2.0.dev1", "2.0.post1", "2.0b3"),
+            **release("2.0rc1", "2.0.dev1", "2.0.post1", "2.0b3", "9"),
             **release("3.0", yanked=("3.0",)),
             **release("4.0", requires_python=">=3.11"),
             "5.0": [],
@@ -211,7 +211,7 @@ class ActionlintTests(unittest.TestCase):
 
     def test_rejects_prerelease_draft_and_odd_tags(self):
         for doc in ({"tag_name": "v1.8.0", "prerelease": True}, {"tag_name": "v1.8.0", "draft": True},
-                    {"tag_name": "nightly"}, {"tag_name": "v1.8.0-rc1"}):
+                    {"tag_name": "nightly"}, {"tag_name": "v1.8.0-rc1"}, {"tag_name": "v٩.٠"}):
             with self.subTest(doc=doc), self.assertRaises(ValueError):
                 self.latest(doc)
 
@@ -258,6 +258,17 @@ class PlanTests(Sandbox):
         changes, errors = utp.plan(self.root, good_network(**{"semgrep@2.0.0": semgrep_meta(*same)}))
         self.assertEqual(errors, [])
         self.assertEqual([c.name for c in changes if c.tool == "semgrep"], ["PIN_SEMGREP"])
+
+    def test_otel_downgrade_or_equivalent_spelling_blocks_semgrep_bump(self):
+        for version in ("0.57b0", "0.58.0b0"):
+            requirements = tuple(f"opentelemetry-instrumentation-{name}~={version}"
+                                 for name in ("requests", "threading"))
+            with self.subTest(version=version):
+                changes, errors = utp.plan(self.root, good_network(
+                    **{"semgrep@2.0.0": semgrep_meta(*requirements)}))
+                self.assertFalse([c for c in changes if c.tool == "semgrep"])
+                self.assertEqual(len(errors), 1)
+                self.assertIn("does not raise", errors[0])
 
     def test_semgrep_bump_is_all_or_nothing_with_its_otel_pin(self):
         net = good_network(**{"semgrep@2.0.0": semgrep_meta(OTEL_OK[1])})
@@ -491,6 +502,46 @@ class ApplyReportTests(Sandbox):
                 self.assertEqual(code, 2)
                 self.assertIn("error:", err)
                 self.assertEqual(self.text(utp.SCANNERS), before)
+
+    def test_report_versions_follow_each_pin_format_and_order(self):
+        scanner = self.root / utp.SCANNERS
+        original = scanner.read_text()
+        cases = (
+            ("PIN_PIP", "25.2", "27.0b1", False),
+            ("PIN_PIP", "25.2", "٩٩.٠", False),
+            ("PIN_PIP", "25.2", "28", False),
+            ("PIN_PIP", "25.2b1", "28.0", False),
+            ("PIN_ZIZMOR", "1.30.1", "2.0b1", False),
+            ("PIN_SEMGREP", "1.0", "2", False),
+            ("PIN_SEMGREP_OTEL", "0.58b0", "1b1", False),
+            ("PIN_SEMGREP_OTEL", "0.58b0", "٩٩.٠b١", False),
+            ("PIN_SEMGREP_OTEL", "0.62b0", "0.62.0", True),
+            ("PIN_SEMGREP_OTEL", "0.62.0", "0.62b1", False),
+            ("PIN_SEMGREP_OTEL", "0.62b2", "0.62b1", False),
+            ("PIN_SEMGREP_OTEL", "0.62b1", "0.62b2", True),
+            ("PIN_SEMGREP_OTEL", "0.62b1", "0.63b0", True),
+            ("PIN_SEMGREP_OTEL", "0.62", "0.62.0", False),
+        )
+        for name, old, new, accepted in cases:
+            with self.subTest(name=name, old=old, new=new):
+                scanner.write_text(utp.set_pin(original, name, old))
+                code, _, _ = self.run_main("--apply-report", self.report(
+                    self.entry(name=name, old=old, new=new)))
+                self.assertEqual(code, 0 if accepted else 2)
+                self.assertEqual(utp.read_pin(scanner.read_text(), name), new if accepted else old)
+
+    def test_generated_beta_to_final_report_validates_and_applies(self):
+        scanner = self.root / utp.SCANNERS
+        scanner.write_text(utp.set_pin(scanner.read_text(), "PIN_SEMGREP_OTEL", "0.62b0"))
+        requirements = tuple(f"opentelemetry-instrumentation-{name}~=0.62.0"
+                             for name in ("requests", "threading"))
+        report = self.root / "final-report.json"
+        code, _, err = self.run_main("--check", "--report", str(report), network=good_network(
+            **{"semgrep@2.0.0": semgrep_meta(*requirements)}))
+        self.assertEqual((code, err), (1, ""))
+        code, _, err = self.run_main("--apply-report", str(report))
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(utp.pins(self.root)["PIN_SEMGREP_OTEL"], "0.62.0")
 
     def test_rejects_a_pin_listed_twice_and_malformed_files(self):
         code, _, _ = self.run_main("--apply-report", self.report(self.entry(), self.entry()))
