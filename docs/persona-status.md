@@ -131,4 +131,7 @@ route is confirmed legacy, including idempotent or error outcomes when bound.
 Use the separate existing CI dispatcher and exact head. Native mode must never
 call that legacy CI publisher. Both/neither/unreadable route evidence is a
 configuration error, not permission to fall back. This public action dispatches
-no CI workflow. Test the rollback configuration as well as forward cutover.
+no CI workflow. The private error hook must not require `evaluated`, `changed`
+or `status_verified` to be true: a bound, non-stale, non-dry error on the trusted
+head may still require a legacy refresh. A dispatch receipt is not proof that
+the legacy gate consumed it. Test rollback as well as forward cutover.
