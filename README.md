@@ -159,7 +159,7 @@ jobs:
     with:
       needs_json: ${{ toJSON(needs) }}
       expected_jobs: '["lint", "test"]'
-      runner-json: '["ubuntu-latest"]'
+      runner-json: '["ubuntu-latest"]' # Public callers only; private callers omit this override.
 ```
 
 Keep the `gatekeeper` job ID and omit its `name` override. Its `if: always()`
