@@ -46,6 +46,17 @@ jobs:
       # nested-quote f-strings broke every org gate until #19). Compile the
       # runner scripts under the oldest supported interpreter. Keep these
       # steps last: setup-python changes which python3 later steps get.
+      - name: Stage the native CI result step for Python 3.10
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import yaml
+
+          config = yaml.safe_load(Path(".github/workflows/reusable-ci-result.yml").read_text())
+          step = config["jobs"]["all-checks-passed"]["steps"][0]["run"]
+          (Path(os.environ["RUNNER_TEMP"]) / "native-ci-result.sh").write_text(step)
+          PY
       - name: Set up Python 3.10 (oldest self-hosted runner)
         uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
@@ -74,3 +85,26 @@ jobs:
               spec.loader.exec_module(module)
               print(f"loaded {path}")
           EOF
+      - name: Execute native CI result under Python 3.10
+        env:
+          NEEDS_JSON: '{"test":{"result":"success"}}'
+          EXPECTED_JOBS: '["test"]'
+        run: |
+          python3 -I -c 'import sys; assert sys.version_info[:2] == (3, 10)'
+          bash -euo pipefail "$RUNNER_TEMP/native-ci-result.sh"
+          if NEEDS_JSON='{"test":{"result":"failure"}}' bash -euo pipefail "$RUNNER_TEMP/native-ci-result.sh" >/dev/null; then
+            echo "::error::A failed dependency passed the native CI result under Python 3.10"
+            exit 1
+          fi
+
+  # Exercise same-revision native wiring without replacing the legacy required
+  # producer. Its distinct caller ID gives a distinct check name.
+  verify-ci-result:
+    needs: [test]
+    if: always()
+    permissions: {}
+    uses: ./.github/workflows/reusable-ci-result.yml
+    with:
+      needs_json: ${{ toJSON(needs) }}
+      expected_jobs: '["test"]'
+      runner-json: '["ubuntu-latest"]' # runner-keep-hosted (public repository smoke)

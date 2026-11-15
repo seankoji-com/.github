@@ -1,0 +1,81 @@
+name: Reusable CI Result
+
+# The caller must use if: always() and list every retained validation job in
+# needs, in this same workflow. This job reads native results; it posts no API
+# check and cannot discover dependencies omitted by the caller.
+on:
+  workflow_call:
+    inputs:
+      needs_json:
+        description: 'Native dependency results, passed as toJSON(needs). Outputs are ignored and never logged.'
+        required: true
+        type: string
+      expected_jobs:
+        description: 'Literal nonempty JSON array of all direct dependency job IDs (lowercase). Must exactly match needs_json keys.'
+        required: true
+        type: string
+      runner-json:
+        description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing.'
+        type: string
+        default: ''
+
+permissions: {}
+
+jobs:
+  all-checks-passed:
+    name: all-checks-passed
+    runs-on: ${{ fromJSON((inputs.runner-json != '' && inputs.runner-json) || (vars.PRIVATE_REPO_SELF_HOSTED == 'true' && '["self-hosted","Linux"]') || '["ubuntu-latest"]') }} # runner-keep-hosted (fallback for public callers and while PRIVATE_REPO_SELF_HOSTED is unset/false)
+    timeout-minutes: 1
+    steps:
+      - name: Require every native dependency to succeed
+        shell: bash
+        env:
+          NEEDS_JSON: ${{ inputs.needs_json }}
+          EXPECTED_JOBS: ${{ inputs.expected_jobs }}
+        run: |
+          python3 -I - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          def reject(message):
+              print("::error::" + message)
+              sys.exit(1)
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      raise ValueError("duplicate JSON key")
+                  result[key] = value
+              return result
+
+          try:
+              expected = json.loads(os.environ["EXPECTED_JOBS"], object_pairs_hook=unique_object)
+              needs = json.loads(os.environ["NEEDS_JSON"], object_pairs_hook=unique_object)
+          except (ValueError, KeyError, RecursionError):
+              reject("Invalid native CI result JSON")
+
+          if (not isinstance(expected, list) or not expected
+                  or any(not isinstance(job, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]*", job)
+                         for job in expected)
+                  or len(set(expected)) != len(expected)):
+              reject("expected_jobs must be a nonempty list of distinct lowercase job IDs")
+          if not isinstance(needs, dict) or set(needs) != set(expected):
+              reject("Native dependency IDs do not match expected_jobs")
+
+          failed = False
+          for job in expected:
+              record = needs[job]
+              result = record.get("result") if isinstance(record, dict) else None
+              if result != "success":
+                  # Never print outputs, raw JSON or untrusted result strings.
+                  label = result if result in ("failure", "cancelled", "skipped") else "invalid result"
+                  hint = "; possibly a superseded run" if result == "cancelled" else ""
+                  print("::error::CI dependency " + job + " did not succeed (" + label + hint + ")")
+                  failed = True
+          if failed:
+              sys.exit(1)
+          print("All " + str(len(expected)) + " native CI dependencies succeeded")
+          PY
