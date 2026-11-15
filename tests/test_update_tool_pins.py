@@ -11,6 +11,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -256,6 +257,20 @@ class PlanTests(Sandbox):
 
 
 class MainTests(Sandbox):
+    def test_simulated_bump_passes_scanner_workflow_contract(self):
+        import test_scanner_seed
+
+        before = utp.pins(self.root)
+        code, _, err = self.run_main()
+        self.assertEqual((code, err), (0, ""))
+        self.assertNotEqual(utp.pins(self.root)["PIN_SEMGREP"], before["PIN_SEMGREP"])
+        contract = test_scanner_seed.SourceContractTests(
+            "test_complete_scopes_and_current_pins_advisory_and_hosted_isolation")
+        with patch.object(test_scanner_seed, "WORKFLOW", self.root / utp.SCANNERS):
+            result = unittest.TestResult()
+            contract.run(result)
+        self.assertTrue(result.wasSuccessful(), f"failures: {result.failures}; errors: {result.errors}")
+
     def test_writes_pins_in_place_then_is_idempotent(self):
         before = {f: self.text(f) for f in (utp.SCANNERS, utp.TESTS)}
         current = utp.pins(self.root)
