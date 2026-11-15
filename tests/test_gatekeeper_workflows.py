@@ -690,9 +690,11 @@ class RequiredWorkflowTests(unittest.TestCase):
         with patch.object(pr_gatekeeper.time, "monotonic", return_value=100.0), \
              patch.object(pr_gatekeeper.workflows.time, "time", return_value=1_793_534_430.0):
             self.assertEqual(self.invoke(), 0)
+            self.assert_gate(("completed", "success"))
             reads, bodies = self.reads[:], self.bodies[:]
             self.reads, self.bodies = [], []
             self.assertEqual(self.invoke("[]"), 0)
+            self.assert_gate(("completed", "success"))
         self.assertCountEqual(self.reads, reads)
         self.assertEqual(self.bodies, bodies)
         # Plain API calls retain empty-inventory success and no PR-list read.
@@ -700,6 +702,9 @@ class RequiredWorkflowTests(unittest.TestCase):
         with patch.object(pr_gatekeeper, "_get", side_effect=self.get), patch.object(pr_gatekeeper, "_post", side_effect=self.post):
             self.assertEqual(pr_gatekeeper.report("org/repo", "head", "fixture", required_workflows="[]"), 0)
         self.assertFalse(any("/pulls?" in p for p in self.reads))
+        self.assertEqual(len(self.bodies), 1)
+        self.assertEqual(self.bodies[0]["head_sha"], "head")
+        self.assertEqual((self.bodies[0]["status"], self.bodies[0].get("conclusion")), ("completed", "success"))
 
     def test_unrelated_prs_have_independent_evidence_and_cached_workflow_metadata(self):
         self.prs.append({"number": 8, "head": {"sha": "head-b", "ref": "other", "repo": {"id": 43}},
