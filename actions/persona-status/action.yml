@@ -1,0 +1,55 @@
+name: Publish persona review status
+description: Refresh an exact-head persona commit status from actual GitHub reviews.
+inputs:
+  target_repository:
+    description: Canonical target repository full_name from trusted GitHub metadata.
+    required: true
+  persona_pr:
+    description: PR identity for the expected head, resolved before publisher admission.
+    required: true
+  head_sha:
+    description: Exact 40-character lowercase head SHA. A superseded intent writes nothing.
+    required: true
+  publisher_bot_id:
+    description: Expected status creator bot ID, independently configured by the controller.
+    required: true
+  token:
+    description: Fresh target-scoped App installation token minted in this same trusted job.
+    required: true
+  persona_state:
+    description: Optional running/failed diagnostic hint. Never decides the review verdict.
+    default: ''
+  dry_run:
+    description: Exact true/false. True performs no API writes, including error paths.
+    default: 'false'
+outputs:
+  result:
+    description: Safe JSON outcome for guarded controller acknowledgement and refresh routing.
+    value: ${{ steps.publish.outputs.result }}
+runs:
+  using: composite
+  steps:
+    - name: Mask the scoped token
+      shell: bash
+      env:
+        PERSONA_TOKEN: ${{ inputs.token }}
+      run: |
+        python3 -I - <<'PY'
+        import os
+        token = os.environ.get('PERSONA_TOKEN', '')
+        if token:
+            print('::add-mask::' + token.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))
+        PY
+    - name: Refresh authoritative persona status
+      id: publish
+      shell: bash
+      env:
+        PERSONA_SCRIPT: ${{ github.action_path }}/publish.py
+        PERSONA_TARGET_REPOSITORY: ${{ inputs.target_repository }}
+        PERSONA_PR: ${{ inputs.persona_pr }}
+        PERSONA_HEAD_SHA: ${{ inputs.head_sha }}
+        PERSONA_PUBLISHER_BOT_ID: ${{ inputs.publisher_bot_id }}
+        PERSONA_TOKEN: ${{ inputs.token }}
+        PERSONA_HINT: ${{ inputs.persona_state }}
+        PERSONA_DRY_RUN: ${{ inputs.dry_run }}
+      run: python3 -I "$PERSONA_SCRIPT"

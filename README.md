@@ -197,6 +197,12 @@ The existing advisory scanner runtime needs its own bounded, blocking migration.
 
 ## Required persona review
 
+The additive [persona status action](docs/persona-status.md) publishes a separate
+review context from authoritative GitHub reviews. It is inactive until a trusted
+controller calls an immutable revision and a verified per-repository rollout
+establishes its App source binding, event delivery and required-ref behavior.
+Adding it does not change the legacy combined gate described below.
+
 Use the [local gatekeeper caller](.github/workflows/call-reusable-pr-gatekeeper.yml)
 as the trigger and permissions reference. Its `head_sha` input identifies the
 commit to evaluate; retain the PR seed, workflow completion and review-event

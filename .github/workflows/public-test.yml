@@ -62,7 +62,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: Compile runner scripts under Python 3.10
-        run: python -m py_compile scripts/*.py
+        run: python -m py_compile scripts/*.py actions/persona-status/*.py
       # py_compile only checks syntax. Loading each script as a module also
       # runs its module-level imports, so a 3.11+/3.12-only stdlib name
       # (itertools.batched, datetime.UTC, ...) fails here instead of on a
@@ -77,7 +77,9 @@ jobs:
           import sys
 
           sys.path.insert(0, "scripts")
-          for path in sorted(pathlib.Path("scripts").glob("*.py")):
+          paths = sorted(pathlib.Path("scripts").glob("*.py"))
+          paths += sorted(pathlib.Path("actions/persona-status").glob("*.py"))
+          for path in paths:
               name = path.stem.replace("-", "_")
               spec = importlib.util.spec_from_file_location(name, path)
               module = importlib.util.module_from_spec(spec)
@@ -96,6 +98,8 @@ jobs:
             echo "::error::A failed dependency passed the native CI result under Python 3.10"
             exit 1
           fi
+      - name: Execute persona publisher tests under Python 3.10
+        run: python -m unittest discover -s tests -p 'test_persona_status.py'
 
   # Exercise same-revision native wiring without replacing the legacy required
   # producer. Its distinct caller ID gives a distinct check name.
