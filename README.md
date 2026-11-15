@@ -34,6 +34,7 @@ Available reusable workflows include:
 - `reusable-static-analysis.yml`
 - `reusable-agent-readiness.yml`
 - `reusable-pr-gatekeeper.yml`
+- `reusable-ci-result.yml`
 - `reusable-dependabot-automerge.yml`
 - `reusable-issue-triage.yml`
 - `reusable-link-check.yml`
@@ -134,6 +135,65 @@ jobs:
       deployments: write
     uses: seankoji-com/.github/.github/workflows/released.yml@main
 ```
+
+## Native CI result
+
+[reusable-ci-result.yml](.github/workflows/reusable-ci-result.yml) checks native
+job results within one workflow. It uses installed Python 3.10 or newer, makes
+no API requests, checks out no code and needs no token permissions. A caller
+named `gatekeeper` produces the required context `gatekeeper / all-checks-passed`.
+
+List every retained validation job directly in both `needs` and `expected_jobs`,
+including upstream jobs, rather than only the final jobs in a chain. An
+intermediate job with `if: always()` can succeed after an upstream failure.
+Use lowercase job IDs and pin the reusable to an approved immutable commit:
+
+```yaml
+jobs:
+  # Define lint and test in THIS workflow.
+  gatekeeper:
+    needs: [lint, test]
+    if: always()
+    permissions: {}
+    uses: seankoji-com/.github/.github/workflows/reusable-ci-result.yml@<approved-40-hex-commit>
+    with:
+      needs_json: ${{ toJSON(needs) }}
+      expected_jobs: '["lint", "test"]'
+      runner-json: '["ubuntu-latest"]' # Public callers only; private callers omit this override.
+```
+
+Keep the `gatekeeper` job ID and omit its `name` override. Its `if: always()`
+is required. Every declared job must report `success`; failed, cancelled,
+skipped, unknown or missing results fail the final job. The declared IDs must
+match exactly, with no empty list or duplicates. A superseded run whose
+dependencies are cancelled also fails, and can consume a final-job runner on
+the old head. This is expected; cancellation must not produce a passing gate.
+
+For path-scoped checks, return a successful explicit no-op inside the validation
+job when nothing applies. Avoid workflow-level `paths` or `paths-ignore`
+filters that suppress the required producer. Do not conditionally skip the
+final job. Retained validations must propagate failures, without masking them
+through `continue-on-error`. The helper cannot detect a job omitted from both
+lists, masked failures, or checks in another workflow. Move those checks into
+the same dependency graph or require their contexts separately in effective rules.
+
+`toJSON(needs)` includes job outputs. They are ignored and never logged, but
+large outputs can exceed the runner's environment-variable limit, roughly
+128 KiB for one string on Linux, before the helper starts. Keep large data in
+artifacts rather than dependency outputs.
+
+This reusable is additive. Existing callers of `reusable-pr-gatekeeper.yml`
+keep their behavior. Before migrating a repository, verify its complete native
+producer, immutable pin and separately required persona producer/rule. Drain
+legacy publishers and use a fresh head before retiring that repository's old
+gatekeeper caller. Do not leave a REST evaluator or another Actions job posting
+the same required CI context. Keep the legacy template for unmigrated callers,
+and ensure distribution/audit knows which producer each repository uses.
+
+The native helper alone does not prove the five-minute CI target. Measure the
+complete retained dependency path, runner setup and final-job execution with
+queues reported separately. Persona review remains a separate required gate.
+The existing advisory scanner runtime needs its own bounded, blocking migration.
 
 ## Required persona review
 
