@@ -686,12 +686,15 @@ class RequiredWorkflowTests(unittest.TestCase):
                 self.assert_gate(("completed", "failure"))
 
     def test_empty_manifest_has_identical_legacy_reads_publications_and_api_behavior(self):
-        self.assertEqual(self.invoke(), 0)
-        self.assert_gate(("completed", "success"))
-        reads, bodies = self.reads[:], self.bodies[:]
-        self.reads, self.bodies = [], []
-        self.assertEqual(self.invoke("[]"), 0)
-        self.assert_gate(("completed", "success"))
+        # Both clock values appear in the published summaries.
+        with patch.object(pr_gatekeeper.time, "monotonic", return_value=100.0), \
+             patch.object(pr_gatekeeper.workflows.time, "time", return_value=1_793_534_430.0):
+            self.assertEqual(self.invoke(), 0)
+            self.assert_gate(("completed", "success"))
+            reads, bodies = self.reads[:], self.bodies[:]
+            self.reads, self.bodies = [], []
+            self.assertEqual(self.invoke("[]"), 0)
+            self.assert_gate(("completed", "success"))
         self.assertCountEqual(self.reads, reads)
         self.assertEqual(self.bodies, bodies)
         # Plain API calls retain empty-inventory success and no PR-list read.
