@@ -40,7 +40,6 @@ Available reusable workflows include:
 - `reusable-link-check.yml`
 - `reusable-review-event.yml`
 - `reusable-persona-recovery-request.yml`
-- `reusable-opencode-greenkeeper-signal.yml`
 - `released.yml`
 
 - [Node CI](.github/workflows/reusable-node-ci.yml) accepts `pnpm`, `npm`, or
@@ -53,10 +52,6 @@ Available reusable workflows include:
   a runner with zsh available; private repositories should select the `mint` pool,
   whose runner image includes zsh. The caller's `.shellspec` selects
   the shell, for example `--shell /bin/zsh`. The workflow needs `contents: read`.
-- [OpenCode greenkeeper](.github/workflows/reusable-opencode-greenkeeper-signal.yml)
-  asks the private controller to look at one pull request. Pass the optional
-  `app_private_key` secret. The check stays green when that secret is missing
-  or the dispatch fails, and the log names the reason without printing the token.
 - [Issue triage](.github/workflows/reusable-issue-triage.yml) and
   [release markers](.github/workflows/released.yml) use `actions/github-script`.
   Callers selecting self-hosted runners must use Actions runner v2.327.1 or newer.
@@ -223,10 +218,13 @@ including queued workflows that have not created job checks yet. It cannot
 detect a test workflow that was never triggered; keep required test callers
 and their trigger coverage under repository review.
 
-The OpenCode greenkeeper signal is the one exception. It checks no code, and
-its caller keeps only the newest signal per pull request and cancels the rest.
-Runs of `.github/workflows/call-reusable-opencode-greenkeeper.yml` from the
-events that caller declares (`pull_request_target`, `pull_request_review` and
+The retired OpenCode greenkeeper signal is the one exception. Its reusable
+workflow and callers were removed in November 2026; the exception remains so
+pull-request heads that still carry a signal run from before the retirement do
+not turn red. The signal checked no code, and its caller kept only the newest
+signal per pull request and cancelled the rest. Runs of
+`.github/workflows/call-reusable-opencode-greenkeeper.yml` from the events that
+caller declared (`pull_request_target`, `pull_request_review` and
 `workflow_run`) are left out of the gate, with their job check runs and any
 check suite that no gated run shares. They never hold or fail the gate, in any
 state. A run of that path from any other event is gated: a `cancelled` run
