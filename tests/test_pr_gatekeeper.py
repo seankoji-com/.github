@@ -166,18 +166,16 @@ class TestBlocking(unittest.TestCase):
                 status, conclusion, _, _ = evaluate([candidate], EMPTY_STATUSES, [])
                 self.assertEqual((status, conclusion), FAILED)
 
-    def test_the_signal_check_name_matches_the_reusable_workflow(self):
-        # The exemption is keyed by the check-run name GitHub composes from the
-        # reusable's workflow and job. Derive it here so a rename in the
-        # workflow fails this test instead of silently re-blocking every head.
-        import yaml
-        root = Path(__file__).resolve().parent.parent
-        reusable = yaml.safe_load(
-            (root / ".github/workflows/reusable-opencode-greenkeeper-signal.yml").read_text()
-        )
-        self.assertEqual([*reusable["jobs"]], ["signal"])
+    def test_the_signal_check_name_matches_the_retired_reusable_workflow(self):
+        # The exemption is keyed by the check-run name GitHub composed from the
+        # retired reusable's workflow name and its `signal` job. The reusable
+        # and its callers were removed when the greenkeeper was retired; the
+        # exemption stays so pull-request heads that still carry a cancelled
+        # signal run from before the retirement do not turn red. Pin the
+        # composed name and path literally now that there is no file to derive
+        # them from.
         self.assertEqual([*pr_gatekeeper.workflows.COALESCING_SIGNAL_CHECKS],
-                         [f"{reusable['name']} / signal"])
+                         ["OpenCode greenkeeper signal / signal"])
         self.assertEqual([*pr_gatekeeper.workflows.COALESCING_SIGNAL_PATHS],
                          [".github/workflows/call-reusable-opencode-greenkeeper.yml"])
 
