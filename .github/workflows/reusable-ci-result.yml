@@ -2,7 +2,8 @@ name: Reusable CI Result
 
 # The caller must use if: always() and list every retained validation job in
 # needs, in this same workflow. This job reads native results; it posts no API
-# check and cannot discover dependencies omitted by the caller.
+# check and cannot discover dependencies omitted by the caller. A skipped job
+# passes only when skippable_jobs declares it.
 on:
   workflow_call:
     inputs:
@@ -14,6 +15,11 @@ on:
         description: 'Literal nonempty JSON array of all direct dependency job IDs (lowercase). Must exactly match needs_json keys.'
         required: true
         type: string
+      skippable_jobs:
+        description: 'Literal JSON array of expected_jobs IDs whose skipped result passes (for example job-level path filters). Failure and cancellation still fail. Default: none.'
+        required: false
+        type: string
+        default: '[]'
       runner-json:
         description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing.'
         type: string
@@ -32,6 +38,7 @@ jobs:
         env:
           NEEDS_JSON: ${{ inputs.needs_json }}
           EXPECTED_JOBS: ${{ inputs.expected_jobs }}
+          SKIPPABLE_JOBS: ${{ inputs.skippable_jobs }}
         run: |
           python3 -I - <<'PY'
           import json
@@ -54,28 +61,45 @@ jobs:
           try:
               expected = json.loads(os.environ["EXPECTED_JOBS"], object_pairs_hook=unique_object)
               needs = json.loads(os.environ["NEEDS_JSON"], object_pairs_hook=unique_object)
+              skippable = json.loads(os.environ["SKIPPABLE_JOBS"], object_pairs_hook=unique_object)
           except (ValueError, KeyError, RecursionError):
               reject("Invalid native CI result JSON")
 
-          if (not isinstance(expected, list) or not expected
-                  or any(not isinstance(job, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]*", job)
-                         for job in expected)
-                  or len(set(expected)) != len(expected)):
+          def distinct_job_ids(value):
+              return (isinstance(value, list)
+                      and all(isinstance(job, str) and re.fullmatch(r"[a-z_][a-z0-9_-]*", job)
+                              for job in value)
+                      and len(set(value)) == len(value))
+
+          if not distinct_job_ids(expected) or not expected:
               reject("expected_jobs must be a nonempty list of distinct lowercase job IDs")
+          if not distinct_job_ids(skippable):
+              reject("skippable_jobs must be a list of distinct lowercase job IDs")
+          if not set(skippable) <= set(expected):
+              reject("skippable_jobs must only list IDs from expected_jobs")
           if not isinstance(needs, dict) or set(needs) != set(expected):
               reject("Native dependency IDs do not match expected_jobs")
 
           failed = False
+          skipped = 0
           for job in expected:
               record = needs[job]
               result = record.get("result") if isinstance(record, dict) else None
-              if result != "success":
+              if result == "skipped" and job in skippable:
+                  print("CI dependency " + job + " skipped (declared in skippable_jobs)")
+                  skipped += 1
+              elif result != "success":
                   # Never print outputs, raw JSON or untrusted result strings.
                   label = result if result in ("failure", "cancelled", "skipped") else "invalid result"
-                  hint = "; possibly a superseded run" if result == "cancelled" else ""
+                  hint = {"cancelled": "; possibly a superseded run",
+                          "skipped": "; not declared in skippable_jobs"}.get(label, "")
                   print("::error::CI dependency " + job + " did not succeed (" + label + hint + ")")
                   failed = True
           if failed:
               sys.exit(1)
-          print("All " + str(len(expected)) + " native CI dependencies succeeded")
+          if skipped:
+              print("All " + str(len(expected)) + " native CI dependencies passed ("
+                    + str(skipped) + " declared skip(s))")
+          else:
+              print("All " + str(len(expected)) + " native CI dependencies succeeded")
           PY

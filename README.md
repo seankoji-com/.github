@@ -159,15 +159,57 @@ jobs:
 
 Keep the `gatekeeper` job ID and omit its `name` override. Its `if: always()`
 is required. Every declared job must report `success`; failed, cancelled,
-skipped, unknown or missing results fail the final job. The declared IDs must
-match exactly, with no empty list or duplicates. A superseded run whose
-dependencies are cancelled also fails, and can consume a final-job runner on
-the old head. This is expected; cancellation must not produce a passing gate.
+unknown or missing results fail the final job, and so does `skipped` unless
+`skippable_jobs` lists the job. The declared IDs must match exactly, with no
+empty list or duplicates. A superseded run whose dependencies are cancelled
+also fails, and can consume a final-job runner on the old head. This is
+expected; cancellation must not produce a passing gate.
 
-For path-scoped checks, return a successful explicit no-op inside the validation
-job when nothing applies. Avoid workflow-level `paths` or `paths-ignore`
-filters that suppress the required producer. Do not conditionally skip the
-final job. Retained validations must propagate failures, without masking them
+| Input | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `needs_json` | yes | | `${{ toJSON(needs) }}` from the caller. |
+| `expected_jobs` | yes | | Literal JSON array of every direct dependency ID. |
+| `skippable_jobs` | no | `'[]'` | Literal JSON array of `expected_jobs` IDs whose `skipped` result passes. |
+| `runner-json` | no | `''` | Runner labels; see [runner selection](#runner-selection). |
+
+For path-scoped checks, prefer a job-level filter: a `changes` job computes
+which checks apply, and each filtered job runs only when its flag is set. List
+the filtered jobs in `skippable_jobs`, and list `changes` in `expected_jobs`
+but not in `skippable_jobs`:
+
+```yaml
+jobs:
+  changes:
+    # Steps omitted: always runs and sets outputs.docs to 'true' or 'false'.
+  docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    # Steps omitted.
+  test:
+    # Steps omitted: always runs.
+  gatekeeper:
+    needs: [changes, docs, test]
+    if: always()
+    permissions: {}
+    uses: seankoji-com/.github/.github/workflows/reusable-ci-result.yml@<approved-40-hex-commit>
+    with:
+      needs_json: ${{ toJSON(needs) }}
+      expected_jobs: '["changes", "docs", "test"]'
+      skippable_jobs: '["docs"]'
+```
+
+GitHub also reports `skipped` for a job whose upstream dependency failed or was
+cancelled. A declared skip is therefore safe only while every upstream job is
+also in `expected_jobs`: the upstream job reports its own failure or
+cancellation, which fails the final job. Every `skippable_jobs` ID must appear
+in `expected_jobs`, and the list must hold distinct lowercase IDs. A declared
+job that fails or is cancelled still fails the final job. Without a `changes`
+job, return a successful explicit no-op inside the validation job when nothing
+applies.
+
+Avoid workflow-level `paths` or `paths-ignore` filters that suppress the
+required producer. Do not conditionally skip the final job. Retained
+validations must propagate failures, without masking them
 through `continue-on-error`. The helper cannot detect a job omitted from both
 lists, masked failures, or checks in another workflow. Move those checks into
 the same dependency graph or require their contexts separately in effective rules.

@@ -91,6 +91,7 @@ jobs:
         env:
           NEEDS_JSON: '{"test":{"result":"success"}}'
           EXPECTED_JOBS: '["test"]'
+          SKIPPABLE_JOBS: '[]'
         run: |
           python3 -I -c 'import sys; assert sys.version_info[:2] == (3, 10)'
           bash -euo pipefail "$RUNNER_TEMP/native-ci-result.sh"
@@ -98,6 +99,11 @@ jobs:
             echo "::error::A failed dependency passed the native CI result under Python 3.10"
             exit 1
           fi
+          if NEEDS_JSON='{"test":{"result":"skipped"}}' bash -euo pipefail "$RUNNER_TEMP/native-ci-result.sh" >/dev/null; then
+            echo "::error::An undeclared skip passed the native CI result under Python 3.10"
+            exit 1
+          fi
+          NEEDS_JSON='{"test":{"result":"skipped"}}' SKIPPABLE_JOBS='["test"]' bash -euo pipefail "$RUNNER_TEMP/native-ci-result.sh"
       - name: Execute persona publisher tests under Python 3.10
         run: python -m unittest discover -s tests -p 'test_persona_status.py'
 

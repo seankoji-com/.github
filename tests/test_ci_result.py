@@ -19,11 +19,16 @@ class NativeCIResultTests(unittest.TestCase):
         cls.workflow = yaml.safe_load(WORKFLOW.read_text())
         cls.job = cls.workflow["jobs"]["all-checks-passed"]
         cls.step = cls.job["steps"][0]
+        # PyYAML loads the bare `on` key as True.
+        cls.inputs = cls.workflow[True]["workflow_call"]["inputs"]
 
-    def execute(self, needs, expected='["lint", "test"]', *, cwd=ROOT, extra_env=None):
+    def execute(self, needs, expected='["lint", "test"]', *, skippable=None, cwd=ROOT, extra_env=None):
+        # GitHub always sets SKIPPABLE_JOBS from the input, using its '[]' default.
+        default = self.inputs["skippable_jobs"]["default"]
         return subprocess.run(
             ["bash", "-euo", "pipefail", "-c", self.step["run"]],
             cwd=cwd, env={**os.environ, "NEEDS_JSON": needs, "EXPECTED_JOBS": expected,
+                          "SKIPPABLE_JOBS": default if skippable is None else skippable,
                           **(extra_env or {})}, capture_output=True, text=True, timeout=5,
         )
 
@@ -49,6 +54,80 @@ class NativeCIResultTests(unittest.TestCase):
                     self.assertIn("CI dependency " + job + " did not succeed", result.stdout)
                     if status == "cancelled":
                         self.assertIn("possibly a superseded run", result.stdout)
+
+    def test_default_skippable_jobs_is_empty_and_preserves_fail_on_skip(self):
+        spec = self.inputs["skippable_jobs"]
+        self.assertEqual(spec, {**spec, "required": False, "type": "string", "default": "[]"})
+        for skippable in (None, "[]"):
+            with self.subTest(skippable=skippable):
+                passed = self.execute(self.results(), skippable=skippable)
+                self.assertEqual(passed.returncode, 0, passed.stdout)
+                self.assertIn("All 2 native CI dependencies succeeded", passed.stdout)
+                for job in ("lint", "test"):
+                    result = self.execute(self.results(**{job: "skipped"}), skippable=skippable)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("CI dependency " + job + " did not succeed (skipped; "
+                                  "not declared in skippable_jobs)", result.stdout)
+
+    def test_undeclared_skip_fails_even_when_another_job_is_skippable(self):
+        result = self.execute(self.results(test="skipped"), skippable='["lint"]')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CI dependency test did not succeed (skipped; not declared", result.stdout)
+
+    def test_declared_skip_passes(self):
+        for overrides in ({"lint": "skipped"}, {"lint": "skipped", "test": "skipped"}):
+            with self.subTest(overrides=overrides):
+                result = self.execute(self.results(**overrides), skippable='["lint", "test"]')
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertIn("CI dependency lint skipped (declared in skippable_jobs)", result.stdout)
+                self.assertIn("All 2 native CI dependencies passed (" + str(len(overrides))
+                              + " declared skip(s))", result.stdout)
+                self.assertNotIn("::error::", result.stdout)
+
+    def test_declared_skippable_job_still_fails_on_any_other_non_success(self):
+        for status in ("failure", "cancelled", "pending", "in_progress", "neutral", "", None):
+            with self.subTest(status=status):
+                result = self.execute(self.results(lint=status), skippable='["lint"]')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CI dependency lint did not succeed", result.stdout)
+        for record in (None, {}, {"result": ["skipped"]}, {"result": {"state": "skipped"}}, "skipped"):
+            with self.subTest(record=record):
+                result = self.execute(json.dumps({"lint": record, "test": {"result": "success"}}),
+                                      skippable='["lint"]')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CI dependency lint did not succeed (invalid result)", result.stdout)
+
+    def test_skippable_jobs_must_be_declared_in_expected_jobs(self):
+        for skippable in (["deploy"], ["lint", "deploy"]):
+            with self.subTest(skippable=skippable):
+                result = self.execute(self.results(lint="skipped"), skippable=json.dumps(skippable))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("skippable_jobs must only list IDs from expected_jobs", result.stdout)
+                self.assertNotIn("deploy", result.stdout + result.stderr)
+
+    def test_skippable_jobs_requires_a_list_of_distinct_lowercase_ids(self):
+        for skippable in ({}, None, "lint", ["lint", "lint"], ["Lint"], ["lint", 1], [["lint"]],
+                          ["lint", "bad\n::warning::value"], [""]):
+            with self.subTest(skippable=skippable):
+                result = self.execute(self.results(lint="skipped"), skippable=json.dumps(skippable))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("skippable_jobs must be a list of distinct lowercase job IDs", result.stdout)
+                self.assertNotIn("::warning::value", result.stdout + result.stderr)
+
+    def test_malformed_or_duplicate_key_skippable_jobs_json_fails(self):
+        for skippable in ("", "not-json", '["lint"', '[{"a":1,"a":2}]'):
+            with self.subTest(skippable=skippable):
+                result = self.execute(self.results(lint="skipped"), skippable=skippable)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("Invalid native CI result JSON", result.stdout)
+        env = {key: value for key, value in os.environ.items() if key != "SKIPPABLE_JOBS"}
+        missing = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", self.step["run"]], cwd=ROOT,
+            env={**env, "NEEDS_JSON": self.results(), "EXPECTED_JOBS": '["lint", "test"]'},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("Invalid native CI result JSON", missing.stdout)
 
     def test_missing_extra_or_empty_native_dependency_inventory_fails(self):
         for needs in ({}, {"lint": {"result": "success"}},
@@ -112,7 +191,8 @@ class NativeCIResultTests(unittest.TestCase):
         self.assertEqual(len(self.job["steps"]), 1)
         self.assertNotIn("uses", self.step)
         self.assertEqual(self.step["env"], {"NEEDS_JSON": "${{ inputs.needs_json }}",
-                                            "EXPECTED_JOBS": "${{ inputs.expected_jobs }}"})
+                                            "EXPECTED_JOBS": "${{ inputs.expected_jobs }}",
+                                            "SKIPPABLE_JOBS": "${{ inputs.skippable_jobs }}"})
         self.assertIn("python3 -I - <<'PY'", self.step["run"])
         self.assertNotIn("${{", self.step["run"])
 
