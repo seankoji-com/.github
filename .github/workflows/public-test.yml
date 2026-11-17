@@ -91,13 +91,34 @@ jobs:
         env:
           NEEDS_JSON: '{"test":{"result":"success"}}'
           EXPECTED_JOBS: '["test"]'
+          SKIPPABLE_JOBS: '[]'
+          SKIP_AUTHORITY: ''
         run: |
           python3 -I -c 'import sys; assert sys.version_info[:2] == (3, 10)'
-          bash -euo pipefail "$RUNNER_TEMP/native-ci-result.sh"
-          if NEEDS_JSON='{"test":{"result":"failure"}}' bash -euo pipefail "$RUNNER_TEMP/native-ci-result.sh" >/dev/null; then
+          result="$RUNNER_TEMP/native-ci-result.sh"
+          bash -euo pipefail "$result"
+          if NEEDS_JSON='{"test":{"result":"failure"}}' bash -euo pipefail "$result" >/dev/null; then
             echo "::error::A failed dependency passed the native CI result under Python 3.10"
             exit 1
           fi
+          if NEEDS_JSON='{"test":{"result":"skipped"}}' bash -euo pipefail "$result" >/dev/null; then
+            echo "::error::An undeclared skip passed the native CI result under Python 3.10"
+            exit 1
+          fi
+          if NEEDS_JSON='{"test":{"result":"skipped"}}' SKIPPABLE_JOBS='["test"]' bash -euo pipefail "$result" >/dev/null; then
+            echo "::error::A declared skip without skip_authority passed the native CI result under Python 3.10"
+            exit 1
+          fi
+          export EXPECTED_JOBS='["changes","test"]' SKIPPABLE_JOBS='["test"]' SKIP_AUTHORITY='changes'
+          if NEEDS_JSON='{"changes":{"result":"failure"},"test":{"result":"skipped"}}' bash -euo pipefail "$result" >/dev/null; then
+            echo "::error::A skip caused by a failed authority passed the native CI result under Python 3.10"
+            exit 1
+          fi
+          if NEEDS_JSON='{"changes":{"result":"success","outputs":{"test":"true"}},"test":{"result":"skipped"}}' bash -euo pipefail "$result" >/dev/null; then
+            echo "::error::A skip of a required job passed the native CI result under Python 3.10"
+            exit 1
+          fi
+          NEEDS_JSON='{"changes":{"result":"success","outputs":{"test":"false"}},"test":{"result":"skipped"}}' bash -euo pipefail "$result"
       - name: Execute persona publisher tests under Python 3.10
         run: python -m unittest discover -s tests -p 'test_persona_status.py'
 

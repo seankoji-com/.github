@@ -159,21 +159,91 @@ jobs:
 
 Keep the `gatekeeper` job ID and omit its `name` override. Its `if: always()`
 is required. Every declared job must report `success`; failed, cancelled,
-skipped, unknown or missing results fail the final job. The declared IDs must
-match exactly, with no empty list or duplicates. A superseded run whose
-dependencies are cancelled also fails, and can consume a final-job runner on
-the old head. This is expected; cancellation must not produce a passing gate.
+unknown or missing results fail the final job, and so does `skipped` unless
+`skippable_jobs` lists the job and `skip_authority` confirms the skip. The
+`expected_jobs` IDs must match the `needs` IDs exactly, with no empty list or
+duplicates. A superseded
+run whose dependencies are cancelled also fails, and can consume a final-job
+runner on the old head. This is expected; cancellation must not produce a
+passing gate.
 
-For path-scoped checks, return a successful explicit no-op inside the validation
-job when nothing applies. Avoid workflow-level `paths` or `paths-ignore`
-filters that suppress the required producer. Do not conditionally skip the
-final job. Retained validations must propagate failures, without masking them
+The gate is only as trustworthy as the caller workflow. On `pull_request`
+events GitHub runs the workflow from the pull request's head commit, so a pull
+request that edits the caller can change `expected_jobs`, `skippable_jobs` or
+the `changes` outputs and still turn the context green. Before relying on this
+helper as a merge gate, require review of `.github/workflows/` changes, for
+example with `CODEOWNERS` and a ruleset that requires code-owner review.
+
+| Input | Required | Default | Meaning |
+| --- | --- | --- | --- |
+| `needs_json` | yes | | `${{ toJSON(needs) }}` from the caller. |
+| `expected_jobs` | yes | | Literal JSON array of every direct dependency ID. |
+| `skippable_jobs` | no | `'[]'` | Literal JSON array of `expected_jobs` IDs whose `skipped` result may pass when `skip_authority` confirms it. |
+| `skip_authority` | when `skippable_jobs` is nonempty | `''` | ID of the job that decides which checks apply. It must be in `expected_jobs` and not in `skippable_jobs`. |
+| `runner-json` | no | `''` | Runner labels; see [runner selection](#runner-selection). |
+
+For path-scoped checks, prefer a job-level filter: a `changes` job computes
+which checks apply, and each filtered job runs only when its flag is set. The
+`changes` job must expose one output per filtered job, named exactly as that
+job's ID, with the value `'true'` or `'false'`. List the filtered jobs in
+`skippable_jobs`, name `changes` as `skip_authority`, and list `changes` in
+`expected_jobs` but not in `skippable_jobs`. Pin a revision that declares
+`skippable_jobs` and `skip_authority`; passing them to an older pin makes the
+caller workflow fail to start with an undefined-input error:
+
+```yaml
+jobs:
+  changes:
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }} # 'true' or 'false'
+    # Steps omitted: always runs; step `filter` sets docs.
+  docs:
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    # Steps omitted.
+  test:
+    # Steps omitted: always runs.
+  gatekeeper:
+    needs: [changes, docs, test]
+    if: always()
+    permissions: {}
+    uses: seankoji-com/.github/.github/workflows/reusable-ci-result.yml@<approved-40-hex-commit>
+    with:
+      needs_json: ${{ toJSON(needs) }}
+      expected_jobs: '["changes", "docs", "test"]'
+      skippable_jobs: '["docs"]'
+      skip_authority: changes
+```
+
+A declared job's `skipped` result passes only when `skip_authority` reported
+`success` and its output named after that job is exactly the string `'false'`.
+GitHub also reports `skipped` for a job whose upstream dependency failed or was
+cancelled, so the declaration alone does not prove the skip was intended. Any
+other case fails the job: the authority failed, was cancelled or skipped, or
+its output is missing, `'true'` or any other value. The final job reads only
+those outputs, compares them with `'false'` and never logs them. Every
+`skippable_jobs` ID must appear in `expected_jobs`, and the list must hold
+distinct lowercase IDs. A declared job that fails or is cancelled still fails
+the final job. Without a `changes` job, return a successful explicit no-op
+inside the validation job when nothing applies.
+
+Make each filtered job depend only on `changes` and other jobs that always run,
+and list every one of those upstream jobs in `expected_jobs`. The authority's
+`'false'` confirms only that the filter did not require the job; it does not
+cover a different upstream job left out of `needs` that also failed.
+
+Avoid workflow-level `paths` or `paths-ignore` filters that suppress the
+required producer. Do not conditionally skip the final job. Retained
+validations must propagate failures, without masking them
 through `continue-on-error`. The helper cannot detect a job omitted from both
 lists, masked failures, or checks in another workflow. Move those checks into
 the same dependency graph or require their contexts separately in effective rules.
 
-`toJSON(needs)` includes job outputs. They are ignored and never logged, but
-large outputs can exceed the runner's environment-variable limit, roughly
+`toJSON(needs)` includes job outputs. The helper reads only
+`skip_authority`'s output for each declared skippable job, compares it with
+`'false'`, and ignores every other output. The helper never prints outputs,
+though the runner may still show step environment values in its own logs. Large
+outputs can exceed the runner's environment-variable limit, roughly
 128 KiB for one string on Linux, before the helper starts. Keep large data in
 artifacts rather than dependency outputs.
 
