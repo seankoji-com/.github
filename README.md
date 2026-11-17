@@ -230,8 +230,11 @@ through `continue-on-error`. The helper cannot detect a job omitted from both
 lists, masked failures, or checks in another workflow. Move those checks into
 the same dependency graph or require their contexts separately in effective rules.
 
-`toJSON(needs)` includes job outputs. They are ignored and never logged, but
-large outputs can exceed the runner's environment-variable limit, roughly
+`toJSON(needs)` includes job outputs. The helper reads only
+`skip_authority`'s output for each declared skippable job, compares it with
+`'false'`, and ignores every other output. The helper never prints outputs,
+though the runner may still show step environment values in its own logs. Large
+outputs can exceed the runner's environment-variable limit, roughly
 128 KiB for one string on Linux, before the helper starts. Keep large data in
 artifacts rather than dependency outputs.
 
