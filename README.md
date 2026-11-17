@@ -160,27 +160,33 @@ jobs:
 Keep the `gatekeeper` job ID and omit its `name` override. Its `if: always()`
 is required. Every declared job must report `success`; failed, cancelled,
 unknown or missing results fail the final job, and so does `skipped` unless
-`skippable_jobs` lists the job. The declared IDs must match exactly, with no
-empty list or duplicates. A superseded run whose dependencies are cancelled
-also fails, and can consume a final-job runner on the old head. This is
-expected; cancellation must not produce a passing gate.
+`skippable_jobs` lists the job and `skip_authority` confirms the skip. The
+declared IDs must match exactly, with no empty list or duplicates. A superseded
+run whose dependencies are cancelled also fails, and can consume a final-job
+runner on the old head. This is expected; cancellation must not produce a
+passing gate.
 
 | Input | Required | Default | Meaning |
 | --- | --- | --- | --- |
 | `needs_json` | yes | | `${{ toJSON(needs) }}` from the caller. |
 | `expected_jobs` | yes | | Literal JSON array of every direct dependency ID. |
-| `skippable_jobs` | no | `'[]'` | Literal JSON array of `expected_jobs` IDs whose `skipped` result passes. |
+| `skippable_jobs` | no | `'[]'` | Literal JSON array of `expected_jobs` IDs whose `skipped` result may pass when `skip_authority` confirms it. |
+| `skip_authority` | when `skippable_jobs` is nonempty | `''` | ID of the job that decides which checks apply. It must be in `expected_jobs` and not in `skippable_jobs`. |
 | `runner-json` | no | `''` | Runner labels; see [runner selection](#runner-selection). |
 
 For path-scoped checks, prefer a job-level filter: a `changes` job computes
-which checks apply, and each filtered job runs only when its flag is set. List
-the filtered jobs in `skippable_jobs`, and list `changes` in `expected_jobs`
-but not in `skippable_jobs`:
+which checks apply, and each filtered job runs only when its flag is set. The
+`changes` job must expose one output per filtered job, named exactly as that
+job's ID, with the value `'true'` or `'false'`. List the filtered jobs in
+`skippable_jobs`, name `changes` as `skip_authority`, and list `changes` in
+`expected_jobs` but not in `skippable_jobs`:
 
 ```yaml
 jobs:
   changes:
-    # Steps omitted: always runs and sets outputs.docs to 'true' or 'false'.
+    outputs:
+      docs: ${{ steps.filter.outputs.docs }} # 'true' or 'false'
+    # Steps omitted: always runs; step `filter` sets docs.
   docs:
     needs: changes
     if: needs.changes.outputs.docs == 'true'
@@ -196,16 +202,20 @@ jobs:
       needs_json: ${{ toJSON(needs) }}
       expected_jobs: '["changes", "docs", "test"]'
       skippable_jobs: '["docs"]'
+      skip_authority: changes
 ```
 
+A declared job's `skipped` result passes only when `skip_authority` reported
+`success` and its output named after that job is exactly the string `'false'`.
 GitHub also reports `skipped` for a job whose upstream dependency failed or was
-cancelled. A declared skip is therefore safe only while every upstream job is
-also in `expected_jobs`: the upstream job reports its own failure or
-cancellation, which fails the final job. Every `skippable_jobs` ID must appear
-in `expected_jobs`, and the list must hold distinct lowercase IDs. A declared
-job that fails or is cancelled still fails the final job. Without a `changes`
-job, return a successful explicit no-op inside the validation job when nothing
-applies.
+cancelled, so the declaration alone does not prove the skip was intended. Any
+other case fails the job: the authority failed, was cancelled or skipped, or
+its output is missing, `'true'` or any other value. The final job reads only
+those outputs, compares them with `'false'` and never logs them. Every
+`skippable_jobs` ID must appear in `expected_jobs`, and the list must hold
+distinct lowercase IDs. A declared job that fails or is cancelled still fails
+the final job. Without a `changes` job, return a successful explicit no-op
+inside the validation job when nothing applies.
 
 Avoid workflow-level `paths` or `paths-ignore` filters that suppress the
 required producer. Do not conditionally skip the final job. Retained

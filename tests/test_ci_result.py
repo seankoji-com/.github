@@ -22,19 +22,37 @@ class NativeCIResultTests(unittest.TestCase):
         # PyYAML loads the bare `on` key as True.
         cls.inputs = cls.workflow[True]["workflow_call"]["inputs"]
 
-    def execute(self, needs, expected='["lint", "test"]', *, skippable=None, cwd=ROOT, extra_env=None):
-        # GitHub always sets SKIPPABLE_JOBS from the input, using its '[]' default.
-        default = self.inputs["skippable_jobs"]["default"]
+    def execute(self, needs, expected='["lint", "test"]', *, skippable=None, authority=None,
+                cwd=ROOT, extra_env=None):
+        # GitHub always sets SKIPPABLE_JOBS and SKIP_AUTHORITY from the inputs,
+        # using their '[]' and '' defaults.
         return subprocess.run(
             ["bash", "-euo", "pipefail", "-c", self.step["run"]],
             cwd=cwd, env={**os.environ, "NEEDS_JSON": needs, "EXPECTED_JOBS": expected,
-                          "SKIPPABLE_JOBS": default if skippable is None else skippable,
+                          "SKIPPABLE_JOBS": (self.inputs["skippable_jobs"]["default"]
+                                             if skippable is None else skippable),
+                          "SKIP_AUTHORITY": (self.inputs["skip_authority"]["default"]
+                                             if authority is None else authority),
                           **(extra_env or {})}, capture_output=True, text=True, timeout=5,
         )
 
     def results(self, **overrides):
         return json.dumps({job: {"result": overrides.get(job, "success")}
                            for job in ("lint", "test")})
+
+    GATED = '["changes", "lint", "test"]'
+
+    def gated(self, changes="success", outputs=None, **overrides):
+        """Needs for a changes authority plus lint and test; outputs default to all 'false'."""
+        authority = {"result": changes}
+        if outputs is not ...:
+            authority["outputs"] = {"lint": "false", "test": "false"} if outputs is None else outputs
+        needs = {"changes": authority}
+        needs.update({job: {"result": overrides.get(job, "success")} for job in ("lint", "test")})
+        return json.dumps(needs)
+
+    def execute_gated(self, needs, skippable='["lint", "test"]', authority="changes"):
+        return self.execute(needs, self.GATED, skippable=skippable, authority=authority)
 
     def test_all_declared_jobs_must_succeed_without_logging_outputs(self):
         secret = "fixture-output-that-must-not-be-logged"
@@ -58,42 +76,144 @@ class NativeCIResultTests(unittest.TestCase):
     def test_default_skippable_jobs_is_empty_and_preserves_fail_on_skip(self):
         spec = self.inputs["skippable_jobs"]
         self.assertEqual(spec, {**spec, "required": False, "type": "string", "default": "[]"})
-        for skippable in (None, "[]"):
-            with self.subTest(skippable=skippable):
-                passed = self.execute(self.results(), skippable=skippable)
+        spec = self.inputs["skip_authority"]
+        self.assertEqual(spec, {**spec, "required": False, "type": "string", "default": ""})
+        for skippable, authority in ((None, None), ("[]", None), ("[]", "")):
+            with self.subTest(skippable=skippable, authority=authority):
+                passed = self.execute(self.results(), skippable=skippable, authority=authority)
                 self.assertEqual(passed.returncode, 0, passed.stdout)
                 self.assertIn("All 2 native CI dependencies succeeded", passed.stdout)
                 for job in ("lint", "test"):
-                    result = self.execute(self.results(**{job: "skipped"}), skippable=skippable)
+                    result = self.execute(self.results(**{job: "skipped"}), skippable=skippable,
+                                          authority=authority)
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("CI dependency " + job + " did not succeed (skipped; "
                                   "not declared in skippable_jobs)", result.stdout)
 
     def test_undeclared_skip_fails_even_when_another_job_is_skippable(self):
-        result = self.execute(self.results(test="skipped"), skippable='["lint"]')
+        result = self.execute_gated(self.gated(test="skipped"), skippable='["lint"]')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("CI dependency test did not succeed (skipped; not declared", result.stdout)
 
-    def test_declared_skip_passes(self):
+    def test_undeclared_skip_fails_with_an_authority_and_no_skippable_jobs(self):
+        result = self.execute_gated(self.gated(test="skipped"), skippable="[]")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CI dependency test did not succeed (skipped; not declared", result.stdout)
+
+    def test_declared_skip_passes_when_authority_reports_false(self):
         for overrides in ({"lint": "skipped"}, {"lint": "skipped", "test": "skipped"}):
             with self.subTest(overrides=overrides):
-                result = self.execute(self.results(**overrides), skippable='["lint", "test"]')
+                result = self.execute_gated(self.gated(**overrides))
                 self.assertEqual(result.returncode, 0, result.stdout)
-                self.assertIn("CI dependency lint skipped (declared in skippable_jobs)", result.stdout)
-                self.assertIn("All 2 native CI dependencies passed (" + str(len(overrides))
+                self.assertIn("CI dependency lint skipped (confirmed by skip_authority)", result.stdout)
+                self.assertIn("All 3 native CI dependencies passed (" + str(len(overrides))
                               + " declared skip(s))", result.stdout)
                 self.assertNotIn("::error::", result.stdout)
+
+    def test_declared_skip_fails_when_upstream_authority_did_not_succeed(self):
+        # Reviewer scenario E4: GitHub reports skipped for a job whose upstream
+        # failed. A declaration alone must not mask that failure.
+        for changes in ("failure", "cancelled", "skipped", "pending", "", None):
+            for outputs in (None, ..., {}):
+                with self.subTest(changes=changes, outputs=outputs):
+                    result = self.execute_gated(self.gated(changes, outputs, lint="skipped"))
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("CI dependency lint did not succeed (skipped; "
+                                  "skip_authority did not succeed)", result.stdout)
+                    self.assertNotIn("lint skipped (confirmed", result.stdout)
+        for record in (None, [], "success", {}, {"result": ["success"]}):
+            with self.subTest(record=record):
+                needs = json.loads(self.gated(lint="skipped"))
+                needs["changes"] = record
+                result = self.execute_gated(json.dumps(needs))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CI dependency lint did not succeed (skipped; "
+                              "skip_authority did not succeed)", result.stdout)
+
+    def test_declared_skip_fails_when_omitted_upstream_cannot_prove_it(self):
+        # E4 with the failed changes job omitted from needs: no authority is
+        # available, so the declared skip is rejected instead of passing.
+        needs = json.dumps({"lint": {"result": "skipped"}, "test": {"result": "success"}})
+        for authority in (None, "", "changes"):
+            with self.subTest(authority=authority):
+                result = self.execute(needs, skippable='["lint"]', authority=authority)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("All 2 native CI dependencies", result.stdout)
+
+    def test_declared_skip_fails_unless_authority_output_is_exactly_false(self):
+        forged = "x\n::warning::forged-output"
+        for outputs in (..., None, [], "false", {}, {"test": "false"},
+                        {"lint": "true", "test": "false"}, {"lint": False, "test": "false"},
+                        {"lint": "False", "test": "false"}, {"lint": " false", "test": "false"},
+                        {"lint": "", "test": "false"}, {"lint": None, "test": "false"},
+                        {"lint": 0, "test": "false"}, {"lint": ["false"], "test": "false"},
+                        {"lint": forged, "test": "false"}):
+            with self.subTest(outputs=outputs):
+                needs = json.loads(self.gated(outputs=outputs, lint="skipped"))
+                if outputs is None:
+                    needs["changes"]["outputs"] = None
+                result = self.execute_gated(json.dumps(needs))
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CI dependency lint did not succeed (skipped; "
+                              "skip_authority did not mark it not required)", result.stdout)
+                self.assertNotIn("forged-output", result.stdout + result.stderr)
+
+    def test_successful_declared_job_needs_no_authority_confirmation(self):
+        result = self.execute_gated(self.gated(outputs={"lint": "true", "test": "true"}))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("All 3 native CI dependencies succeeded", result.stdout)
+
+    def test_skip_authority_is_required_when_skippable_jobs_is_nonempty(self):
+        for authority in (None, ""):
+            with self.subTest(authority=authority):
+                result = self.execute(self.gated(lint="skipped"), self.GATED, skippable='["lint"]',
+                                      authority=authority)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("skip_authority is required when skippable_jobs is nonempty",
+                              result.stdout)
+
+    def test_skip_authority_must_be_expected_and_not_skippable(self):
+        for authority, message in (("deploy", "skip_authority must be listed in expected_jobs"),
+                                   ("lint", "skip_authority must not be listed in skippable_jobs")):
+            with self.subTest(authority=authority):
+                result = self.execute_gated(self.gated(lint="skipped"), skippable='["lint"]',
+                                            authority=authority)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(message, result.stdout)
+                self.assertNotIn("deploy", result.stdout + result.stderr)
+
+    def test_malformed_skip_authority_fails_without_echo(self):
+        for authority in ("Changes", "changes ", " changes", "1changes", "changes\n",
+                          "bad\n::warning::forged-authority", '["changes"]', "$(true)"):
+            with self.subTest(authority=authority):
+                result = self.execute_gated(self.gated(lint="skipped"), skippable='["lint"]',
+                                            authority=authority)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("skip_authority must be a lowercase job ID", result.stdout)
+                self.assertNotIn("forged-authority", result.stdout + result.stderr)
+
+    def test_missing_skip_authority_environment_fails_closed(self):
+        env = {key: value for key, value in os.environ.items() if key != "SKIP_AUTHORITY"}
+        result = subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", self.step["run"]], cwd=ROOT,
+            env={**env, "NEEDS_JSON": self.results(), "EXPECTED_JOBS": '["lint", "test"]',
+                 "SKIPPABLE_JOBS": "[]"},
+            capture_output=True, text=True, timeout=5,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Invalid native CI result JSON", result.stdout)
 
     def test_declared_skippable_job_still_fails_on_any_other_non_success(self):
         for status in ("failure", "cancelled", "pending", "in_progress", "neutral", "", None):
             with self.subTest(status=status):
-                result = self.execute(self.results(lint=status), skippable='["lint"]')
+                result = self.execute_gated(self.gated(lint=status), skippable='["lint"]')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("CI dependency lint did not succeed", result.stdout)
         for record in (None, {}, {"result": ["skipped"]}, {"result": {"state": "skipped"}}, "skipped"):
             with self.subTest(record=record):
-                result = self.execute(json.dumps({"lint": record, "test": {"result": "success"}}),
-                                      skippable='["lint"]')
+                needs = json.loads(self.gated())
+                needs["lint"] = record
+                result = self.execute_gated(json.dumps(needs), skippable='["lint"]')
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("CI dependency lint did not succeed (invalid result)", result.stdout)
 
@@ -192,7 +312,8 @@ class NativeCIResultTests(unittest.TestCase):
         self.assertNotIn("uses", self.step)
         self.assertEqual(self.step["env"], {"NEEDS_JSON": "${{ inputs.needs_json }}",
                                             "EXPECTED_JOBS": "${{ inputs.expected_jobs }}",
-                                            "SKIPPABLE_JOBS": "${{ inputs.skippable_jobs }}"})
+                                            "SKIPPABLE_JOBS": "${{ inputs.skippable_jobs }}",
+                                            "SKIP_AUTHORITY": "${{ inputs.skip_authority }}"})
         self.assertIn("python3 -I - <<'PY'", self.step["run"])
         self.assertNotIn("${{", self.step["run"])
 

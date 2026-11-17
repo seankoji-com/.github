@@ -3,12 +3,17 @@ name: Reusable CI Result
 # The caller must use if: always() and list every retained validation job in
 # needs, in this same workflow. This job reads native results; it posts no API
 # check and cannot discover dependencies omitted by the caller. A skipped job
-# passes only when skippable_jobs declares it.
+# passes only when skippable_jobs declares it AND the skip_authority job
+# succeeded with an output named after that job set to exactly 'false'. GitHub
+# also reports skipped when an upstream dependency fails, so a declaration alone
+# does not prove the skip was intended. Outputs are otherwise ignored: only
+# needs[skip_authority].outputs[<declared job>] is read, compared with 'false',
+# and never logged.
 on:
   workflow_call:
     inputs:
       needs_json:
-        description: 'Native dependency results, passed as toJSON(needs). Outputs are ignored and never logged.'
+        description: 'Native dependency results, passed as toJSON(needs). Only needs[skip_authority].outputs[<declared job>] is read, compared with ''false'', and never logged.'
         required: true
         type: string
       expected_jobs:
@@ -16,10 +21,15 @@ on:
         required: true
         type: string
       skippable_jobs:
-        description: 'Literal JSON array of expected_jobs IDs whose skipped result passes (for example job-level path filters). Failure and cancellation still fail. Default: none.'
+        description: 'Literal JSON array of expected_jobs IDs whose skipped result may pass (for example job-level path filters). A skip passes only when skip_authority confirms it. Failure and cancellation still fail. Default: none.'
         required: false
         type: string
         default: '[]'
+      skip_authority:
+        description: 'Job ID in expected_jobs, not in skippable_jobs, that proves each declared skip was intended. Required when skippable_jobs is nonempty. It must succeed and set an output named after each declared job to ''true'' or ''false''; only ''false'' lets that skip pass. Default: none.'
+        required: false
+        type: string
+        default: ''
       runner-json:
         description: 'JSON runner labels. Omitted: ["self-hosted","Linux"] when PRIVATE_REPO_SELF_HOSTED=true, otherwise ubuntu-latest. Explicit labels override routing.'
         type: string
@@ -39,6 +49,7 @@ jobs:
           NEEDS_JSON: ${{ inputs.needs_json }}
           EXPECTED_JOBS: ${{ inputs.expected_jobs }}
           SKIPPABLE_JOBS: ${{ inputs.skippable_jobs }}
+          SKIP_AUTHORITY: ${{ inputs.skip_authority }}
         run: |
           python3 -I - <<'PY'
           import json
@@ -62,13 +73,15 @@ jobs:
               expected = json.loads(os.environ["EXPECTED_JOBS"], object_pairs_hook=unique_object)
               needs = json.loads(os.environ["NEEDS_JSON"], object_pairs_hook=unique_object)
               skippable = json.loads(os.environ["SKIPPABLE_JOBS"], object_pairs_hook=unique_object)
+              authority = os.environ["SKIP_AUTHORITY"]
           except (ValueError, KeyError, RecursionError):
               reject("Invalid native CI result JSON")
 
+          def job_id(value):
+              return isinstance(value, str) and re.fullmatch(r"[a-z_][a-z0-9_-]*", value) is not None
+
           def distinct_job_ids(value):
-              return (isinstance(value, list)
-                      and all(isinstance(job, str) and re.fullmatch(r"[a-z_][a-z0-9_-]*", job)
-                              for job in value)
+              return (isinstance(value, list) and all(job_id(job) for job in value)
                       and len(set(value)) == len(value))
 
           if not distinct_job_ids(expected) or not expected:
@@ -77,8 +90,28 @@ jobs:
               reject("skippable_jobs must be a list of distinct lowercase job IDs")
           if not set(skippable) <= set(expected):
               reject("skippable_jobs must only list IDs from expected_jobs")
+          if authority == "":
+              if skippable:
+                  reject("skip_authority is required when skippable_jobs is nonempty")
+          elif not job_id(authority):
+              reject("skip_authority must be a lowercase job ID")
+          elif authority not in expected:
+              reject("skip_authority must be listed in expected_jobs")
+          elif authority in skippable:
+              reject("skip_authority must not be listed in skippable_jobs")
           if not isinstance(needs, dict) or set(needs) != set(expected):
               reject("Native dependency IDs do not match expected_jobs")
+
+          def unconfirmed_skip(job):
+              # Positive proof only: the authority succeeded and set this job's
+              # output to exactly 'false'. Output values are never printed.
+              record = needs[authority]
+              if not isinstance(record, dict) or record.get("result") != "success":
+                  return "skip_authority did not succeed"
+              outputs = record.get("outputs")
+              if not isinstance(outputs, dict) or outputs.get(job) != "false":
+                  return "skip_authority did not mark it not required"
+              return None
 
           failed = False
           skipped = 0
@@ -86,8 +119,13 @@ jobs:
               record = needs[job]
               result = record.get("result") if isinstance(record, dict) else None
               if result == "skipped" and job in skippable:
-                  print("CI dependency " + job + " skipped (declared in skippable_jobs)")
-                  skipped += 1
+                  reason = unconfirmed_skip(job)
+                  if reason:
+                      print("::error::CI dependency " + job + " did not succeed (skipped; " + reason + ")")
+                      failed = True
+                  else:
+                      print("CI dependency " + job + " skipped (confirmed by skip_authority)")
+                      skipped += 1
               elif result != "success":
                   # Never print outputs, raw JSON or untrusted result strings.
                   label = result if result in ("failure", "cancelled", "skipped") else "invalid result"
