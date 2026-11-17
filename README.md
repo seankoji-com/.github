@@ -161,7 +161,8 @@ Keep the `gatekeeper` job ID and omit its `name` override. Its `if: always()`
 is required. Every declared job must report `success`; failed, cancelled,
 unknown or missing results fail the final job, and so does `skipped` unless
 `skippable_jobs` lists the job and `skip_authority` confirms the skip. The
-declared IDs must match exactly, with no empty list or duplicates. A superseded
+`expected_jobs` IDs must match the `needs` IDs exactly, with no empty list or
+duplicates; an empty `skippable_jobs` is the default. A superseded
 run whose dependencies are cancelled also fails, and can consume a final-job
 runner on the old head. This is expected; cancellation must not produce a
 passing gate.
@@ -216,6 +217,11 @@ those outputs, compares them with `'false'` and never logs them. Every
 distinct lowercase IDs. A declared job that fails or is cancelled still fails
 the final job. Without a `changes` job, return a successful explicit no-op
 inside the validation job when nothing applies.
+
+Make each filtered job depend only on `changes` and other jobs that always run,
+and list every one of those upstream jobs in `expected_jobs`. The authority's
+`'false'` confirms only that the filter did not require the job; it does not
+cover a different upstream job left out of `needs` that also failed.
 
 Avoid workflow-level `paths` or `paths-ignore` filters that suppress the
 required producer. Do not conditionally skip the final job. Retained
