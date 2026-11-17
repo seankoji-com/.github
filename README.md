@@ -162,10 +162,17 @@ is required. Every declared job must report `success`; failed, cancelled,
 unknown or missing results fail the final job, and so does `skipped` unless
 `skippable_jobs` lists the job and `skip_authority` confirms the skip. The
 `expected_jobs` IDs must match the `needs` IDs exactly, with no empty list or
-duplicates; an empty `skippable_jobs` is the default. A superseded
+duplicates. A superseded
 run whose dependencies are cancelled also fails, and can consume a final-job
 runner on the old head. This is expected; cancellation must not produce a
 passing gate.
+
+The gate is only as trustworthy as the caller workflow. On `pull_request`
+events GitHub runs the workflow from the pull request's head commit, so a pull
+request that edits the caller can change `expected_jobs`, `skippable_jobs` or
+the `changes` outputs and still turn the context green. Before relying on this
+helper as a merge gate, require review of `.github/workflows/` changes, for
+example with `CODEOWNERS` and a ruleset that requires code-owner review.
 
 | Input | Required | Default | Meaning |
 | --- | --- | --- | --- |
@@ -180,7 +187,9 @@ which checks apply, and each filtered job runs only when its flag is set. The
 `changes` job must expose one output per filtered job, named exactly as that
 job's ID, with the value `'true'` or `'false'`. List the filtered jobs in
 `skippable_jobs`, name `changes` as `skip_authority`, and list `changes` in
-`expected_jobs` but not in `skippable_jobs`:
+`expected_jobs` but not in `skippable_jobs`. Pin a revision that declares
+`skippable_jobs` and `skip_authority`; passing them to an older pin makes the
+caller workflow fail to start with an undefined-input error:
 
 ```yaml
 jobs:
