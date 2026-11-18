@@ -31,7 +31,8 @@ failure. Before checkout, the job checks the root repository's own Git config
 for partial-clone markers from older runs. If it finds one, it logs the recovery
 and removes the root `.git` directory so the next checkout at the workspace root
 can rebuild it. The recovery step leaves working files in place and refuses
-symlinked metadata. It runs when Agent Readiness next uses that workspace.
+symlinked metadata. The recovery runs in the prepare step of whichever Agent
+Readiness job next lands on that workspace, before its own checkout.
 
 ## The standard
 
