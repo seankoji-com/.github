@@ -16,13 +16,22 @@ python3 scripts/agent_readiness.py --root . --baseline base.json  # what changed
 ```
 
 PR mode (`--ci`) also needs `scripts/agent_readiness_git.py`. The reusable
-workflow stages both files from its immutable workflow commit. It checks out
-the event commit, including GitHub's synthetic PR merge, then fetches only that
-commit's and the base branch's complete histories with `blob:none`. Other
-branches, tags and LFS objects are not fetched. A detached worktree supplies the
-exact merge-base files for rename-aware comparison; Git credentials exist only
-in the subprocess environment. If history or either script is unavailable,
-enforced repositories fail; advisory repositories report the missing check.
+workflow stages both scripts from its immutable workflow commit. On this
+repository's same-commit caller, it copies them from the checked-out tree.
+It checks out the event commit, including GitHub's synthetic PR merge, then
+fetches only that commit's and the base branch's complete histories with
+`blob:none`. A detached worktree supplies the exact merge-base files for
+rename-aware comparison. The checker passes Git credentials through the
+subprocess environment. If history or either script is unavailable, enforced
+repositories fail and advisory repositories report the missing check.
+
+Checkout and scoring use a fresh job-private directory under
+`$GITHUB_WORKSPACE`. The final step removes it even after a checkout or checker
+failure. Before checkout, the job checks the root repository's own Git config
+for partial-clone markers from older runs. If it finds one, it logs the recovery
+and removes the root `.git` directory so the next checkout at the workspace root
+can rebuild it. The recovery step leaves working files in place and refuses
+symlinked metadata. It runs when Agent Readiness next uses that workspace.
 
 ## The standard
 

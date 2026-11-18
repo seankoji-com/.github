@@ -38,11 +38,45 @@ jobs:
     env:
       GIT_LFS_SKIP_SMUDGE: '1'
     steps:
+      - name: Prepare isolated checkout
+        id: workspace
+        shell: bash
+        run: |
+          if [[ "$GITHUB_WORKSPACE" == / || "$GITHUB_WORKSPACE" != "$(pwd -P)" ]]; then
+            echo "::error::Refusing to use a non-canonical GitHub workspace"
+            exit 1
+          fi
+
+          # Older readiness jobs left partial clones at the workspace root.
+          # Removing just their Git metadata lets the next root checkout rebuild
+          # with credentials. Clearing config alone would leave missing objects.
+          git_dir="$GITHUB_WORKSPACE/.git"
+          config="$git_dir/config"
+          if [[ -L "$git_dir" || -L "$config" ]]; then
+            echo "::error::Refusing to inspect symlinked workspace Git metadata"
+            exit 1
+          fi
+          if [[ -d "$git_dir" && -f "$config" ]]; then
+            cfg=(git config --file "$config" --no-includes)
+            if [[ "$("${cfg[@]}" --type=bool --get remote.origin.promisor 2>/dev/null)" == true ]] ||
+               "${cfg[@]}" --get remote.origin.partialclonefilter >/dev/null ||
+               "${cfg[@]}" --get extensions.partialClone >/dev/null; then
+              echo "::notice::Removing partial-clone metadata from the workspace root for the next checkout"
+              rm -rf -- "$git_dir"
+            fi
+          fi
+
+          # Reserve a fresh path inside the workspace, as actions/checkout
+          # requires. A cancelled job's leftover clone will never be reused.
+          checkout="$(mktemp -d "$GITHUB_WORKSPACE/.agent-readiness.XXXXXXXX")"
+          printf 'path=%s\n' "${checkout##*/}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The checker fetches only this commit's and the base branch's
           # histories; historical blobs, unrelated branches and tags stay remote.
+          path: ${{ steps.workspace.outputs.path }}
           fetch-depth: 1
           filter: blob:none
           lfs: false
@@ -50,6 +84,7 @@ jobs:
 
       - name: Stage the checker
         id: stage
+        working-directory: ${{ steps.workspace.outputs.path }}
         env:
           JOB_WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
@@ -96,8 +131,27 @@ jobs:
       # all inside the script so the public export runs the identical logic.
       - name: Score merge-base and head
         if: steps.stage.outputs.staged == 'true'
+        working-directory: ${{ steps.workspace.outputs.path }}
         env:
           GITHUB_BASE_REF: ${{ github.base_ref }}
           AGENT_READINESS_GIT_TOKEN: ${{ github.token }}
         run: |
           python3 "${RUNNER_TEMP}/agent_readiness.py" --ci --root .
+
+      - name: Remove isolated checkout
+        if: always()
+        shell: bash
+        env:
+          CHECKOUT_PATH: ${{ steps.workspace.outputs.path }}
+        run: |
+          # No path was allocated if preparation failed before mktemp.
+          if [[ -z "$CHECKOUT_PATH" ]]; then
+            exit 0
+          fi
+          if [[ "$GITHUB_WORKSPACE" == / || "$GITHUB_WORKSPACE" != "$(pwd -P)" ||
+                ! "$CHECKOUT_PATH" =~ ^\.agent-readiness\.[A-Za-z0-9]{8}$ ||
+                -L "$GITHUB_WORKSPACE/$CHECKOUT_PATH" ]]; then
+            echo "::error::Refusing to remove an unsafe agent readiness checkout path"
+            exit 1
+          fi
+          rm -rf -- "${GITHUB_WORKSPACE:?}/${CHECKOUT_PATH:?}"

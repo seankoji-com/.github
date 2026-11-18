@@ -140,6 +140,154 @@ class NodeWorkflowTests(unittest.TestCase):
             self.assertNotIn("skipping", result.stdout)
 
 
+class AgentReadinessWorkspaceTests(unittest.TestCase):
+    def setUp(self):
+        self.steps = workflow("reusable-agent-readiness.yml")["jobs"]["agent-readiness"]["steps"]
+        self.by_name = {step["name"]: step for step in self.steps}
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.workspace = self.root / "workspace with spaces"
+        self.workspace.mkdir()
+        self.output = self.root / "github-output"
+
+    def run_step(self, name, *, cwd=None, **env):
+        return subprocess.run(
+            ["bash", "-euo", "pipefail", "-c", self.by_name[name]["run"]],
+            cwd=cwd or self.workspace, capture_output=True, text=True,
+            env={**os.environ, "GITHUB_WORKSPACE": str(self.workspace),
+                 "GITHUB_OUTPUT": str(self.output), **env},
+        )
+
+    def prepare(self):
+        self.output.write_text("")
+        result = self.run_step("Prepare isolated checkout")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        key, path = self.output.read_text().strip().split("=", 1)
+        self.assertEqual(key, "path")
+        checkout = self.workspace / path
+        self.assertEqual(checkout.resolve().parent, self.workspace)
+        self.assertTrue(checkout.is_dir())
+        return checkout, result.stdout
+
+    def test_checkout_and_checker_use_the_private_directory(self):
+        checkout = self.by_name["Checkout"]
+        prepare = self.by_name["Prepare isolated checkout"]
+        self.assertLess(self.steps.index(prepare), self.steps.index(checkout))
+        path = checkout["with"]["path"]
+        self.assertEqual(path, "${{ steps." + prepare["id"] + ".outputs.path }}")
+        for name in ("Stage the checker", "Score merge-base and head"):
+            self.assertEqual(self.by_name[name]["working-directory"], path)
+        self.assertIn("--ci --root .", self.by_name["Score merge-base and head"]["run"])
+
+    def test_same_commit_hub_stages_scripts_from_the_private_checkout(self):
+        checkout, _ = self.prepare()
+        runner_temp = self.root / "runner-temp"
+        runner_temp.mkdir()
+        contents = {"agent_readiness.py": "# hub checker\n",
+                    "agent_readiness_git.py": "# hub Git helper\n"}
+        for root in (self.workspace, checkout):
+            (root / "scripts").mkdir()
+            for name, script in contents.items():
+                (root / "scripts" / name).write_text(
+                    script if root == checkout else "# stale workspace copy\n")
+        self.output.write_text("")
+        result = self.run_step(
+            "Stage the checker", cwd=checkout, GITHUB_REPOSITORY="seankoji-com/.github",
+            RUNNER_TEMP=str(runner_temp), JOB_WORKFLOW_SHA="",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.output.read_text(), "staged=true\n")
+        for name, script in contents.items():
+            self.assertEqual((runner_temp / name).read_text(), script)
+
+    def test_final_cleanup_removes_only_this_jobs_checkout(self):
+        cleanup = self.by_name["Remove isolated checkout"]
+        self.assertIs(cleanup, self.steps[-1])
+        self.assertEqual(cleanup["if"], "always()")
+        self.assertEqual(cleanup["env"]["CHECKOUT_PATH"], self.by_name["Checkout"]["with"]["path"])
+        previous, _ = self.prepare()
+        checkout, _ = self.prepare()
+        self.assertNotEqual(previous, checkout)
+        (checkout / "partial-checkout").write_text("fixture")
+        result = self.run_step("Remove isolated checkout", CHECKOUT_PATH=checkout.name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(checkout.exists())
+        self.assertTrue(previous.is_dir())
+
+    def test_cleanup_refuses_paths_outside_the_job_checkout(self):
+        checkout, _ = self.prepare()
+        checkout.rmdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        checkout.symlink_to(outside, target_is_directory=True)
+        for path in (checkout.name, "../outside", ".", str(outside)):
+            with self.subTest(path=path):
+                result = self.run_step("Remove isolated checkout", CHECKOUT_PATH=path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(checkout.is_symlink())
+                self.assertTrue(outside.is_dir())
+        result = self.run_step("Remove isolated checkout", CHECKOUT_PATH="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_recovery_removes_only_git_metadata_with_a_partial_clone_marker(self):
+        git_dir = self.workspace / ".git"
+        working_file = self.workspace / "tracked.txt"
+        working_file.write_text("keep")
+        for key, value, heal in (
+            (None, None, False),
+            ("remote.origin.promisor", "false", False),
+            ("remote.other.promisor", "true", False),
+            ("remote.origin.promisor", "true", True),
+            ("remote.origin.partialclonefilter", "blob:none", True),
+            ("extensions.partialClone", "origin", True),
+        ):
+            with self.subTest(key=key, value=value):
+                subprocess.run(["git", "init", "-q"], cwd=self.workspace, check=True)
+                config = git_dir / "config"
+                if key is not None:
+                    subprocess.run(["git", "config", "--file", str(config), key, value], check=True)
+                before = config.read_bytes()
+                _, log = self.prepare()
+                self.assertEqual(git_dir.exists(), not heal)
+                self.assertEqual("Removing partial-clone metadata" in log, heal)
+                self.assertEqual(working_file.read_text(), "keep")
+                if not heal:
+                    self.assertEqual(config.read_bytes(), before)
+
+    def test_recovery_refuses_symlinks_and_leaves_gitfiles_intact(self):
+        git_dir = self.workspace / ".git"
+        outside = self.root / "outside"
+        outside.mkdir()
+        config = outside / "config"
+        config.write_text('[remote "origin"]\n\tpromisor = true\n')
+        git_dir.write_text(f"gitdir: {outside}\n")
+        self.prepare()
+        self.assertEqual(git_dir.read_text(), f"gitdir: {outside}\n")
+        git_dir.unlink()
+        git_dir.symlink_to(outside, target_is_directory=True)
+        result = self.run_step("Prepare isolated checkout")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(git_dir.is_symlink())
+        git_dir.unlink()
+        git_dir.mkdir()
+        (git_dir / "config").symlink_to(config)
+        result = self.run_step("Prepare isolated checkout")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue((git_dir / "config").is_symlink())
+        self.assertTrue(config.is_file())
+
+    def test_preparation_and_cleanup_refuse_a_symlinked_workspace(self):
+        checkout, _ = self.prepare()
+        alias = self.root / "alias"
+        alias.symlink_to(self.workspace, target_is_directory=True)
+        for step in ("Prepare isolated checkout", "Remove isolated checkout"):
+            with self.subTest(step=step):
+                result = self.run_step(step, GITHUB_WORKSPACE=str(alias), CHECKOUT_PATH=checkout.name)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(checkout.is_dir())
+
+
 class SharedWorkflowTests(unittest.TestCase):
     def test_github_script_data_is_passed_through_matching_environment_keys(self):
         import re
@@ -233,7 +381,10 @@ class SharedWorkflowTests(unittest.TestCase):
 
     def test_readiness_stages_companion_at_same_sha_before_running(self):
         job = workflow("reusable-agent-readiness.yml")["jobs"]["agent-readiness"]
-        checkout, stage, score = job["steps"]
+        steps = {step["name"]: step for step in job["steps"]}
+        checkout = steps["Checkout"]
+        stage = steps["Stage the checker"]
+        score = steps["Score merge-base and head"]
         self.assertEqual(checkout["with"]["fetch-depth"], 1)
         self.assertEqual(checkout["with"]["filter"], "blob:none")
         self.assertFalse(checkout["with"]["persist-credentials"])

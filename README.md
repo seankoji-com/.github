@@ -94,6 +94,11 @@ provisioning. If the variable is unavailable, that run falls back to hosted;
 explicit self-hosted `runner-json` values avoid that residual. Unset variables
 also leave private omissions on hosted until the operator provisions them.
 
+Agent Readiness uses a fresh checkout directory for each job and removes it
+during cleanup. When it encounters partial-clone metadata at the workspace root
+from an older run, it removes that metadata so the next root checkout can start
+fresh. See [Agent Readiness](docs/agent-readiness.md).
+
 Persona recovery handles the CI App private key, so it never uses the shared
 pool. Per-head request jobs are disabled by default to avoid hosted charges on
 every PR head. Normal webhook review dispatch and the private controller's
