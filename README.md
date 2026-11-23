@@ -293,6 +293,11 @@ including queued workflows that have not created job checks yet. It cannot
 detect a test workflow that was never triggered; keep required test callers
 and their trigger coverage under repository review.
 
+Any evaluator run that lists open PRs reads a 404 from `/pulls` as no open PR
+when the repository's `has_pull_requests` confirms the feature is off, so a
+push head in that repository still gets a verdict. Every other 404 and read
+failure keeps failing closed.
+
 The retired OpenCode greenkeeper signal is the one exception. Its reusable
 workflow and callers were removed in November 2026; the exception remains so
 pull-request heads that still carry a signal run from before the retirement do

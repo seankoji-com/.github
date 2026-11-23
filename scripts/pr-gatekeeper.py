@@ -305,17 +305,24 @@ def persona_marker(number: int, verdict: tuple[str, str | None]) -> str:
 
 
 def _list_all(path: str, token: str, key: str = "") -> list[dict]:
-    items, page = [], 1
-    separator = "&" if "?" in path else "?"
-    while True:
-        batch = _get(f"{path}{separator}per_page=100&page={page}", token)
-        batch = _batch(batch, key) if key else batch
-        if not isinstance(batch, list) or not all(isinstance(i, dict) for i in batch):
-            raise ValueError("invalid paginated list response")
-        items.extend(batch)
-        if len(batch) < 100:
-            return items
-        page += 1
+    return workflows.list_all(_get, _batch, path, token, key=key)
+
+
+def open_pull_requests(repo: str, token: str) -> list[dict]:
+    """Every open PR, or none when the repository has Pull Requests disabled.
+
+    GitHub answers 404 for /pulls on a repository whose Pull Requests feature is
+    off. Such a repository has no PR head to gate, and the gate still evaluates
+    its push heads, so that 404 reads as an empty list instead of failing the
+    evaluation. Every other 404 keeps failing closed: repository metadata must
+    confirm `has_pull_requests: false` before the 404 is trusted.
+    """
+    try:
+        return _list_all(f"/repos/{repo}/pulls?state=open", token)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404 or not workflows.pull_requests_disabled(_get, repo, token):
+            raise
+        return []
 
 
 def matching_prs(prs: list[dict], sha: str) -> list[dict]:
@@ -334,7 +341,7 @@ def collect_persona_checks(repo: str, sha: str, token: str, prs: list[dict] | No
     """
     checks = []
     if prs is None:
-        prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
+        prs = open_pull_requests(repo, token)
     for pr in matching_prs(prs, sha):
         reviews = _list_all(f"/repos/{repo}/pulls/{pr['number']}/reviews", token)
         status, conclusion = persona_verdict(reviews, pr["head"]["sha"])
@@ -438,7 +445,7 @@ def resolve_review_heads(repo: str, run_id: int, token: str, open_prs: list[dict
         raise ValueError("not a review event workflow run")
     linked = {p["number"] for p in run.get("pull_requests", [])}
     heads = set()
-    for pr in (open_prs if open_prs is not None else _list_all(f"/repos/{repo}/pulls?state=open", token)):
+    for pr in (open_prs if open_prs is not None else open_pull_requests(repo, token)):
         head = pr["head"]
         same_branch = ((run.get("head_repository") or {}).get("id") is not None
                        and (head.get("repo") or {}).get("id") == run["head_repository"]["id"]
@@ -582,7 +589,7 @@ def report(repo: str, sha: str, token: str, dry_run: bool = False, error: str | 
         prs = []
         if open_prs is not None or persona_required or require_ci or entries or entries is None:
             prs = matching_prs(open_prs if open_prs is not None else
-                               _list_all(f"/repos/{repo}/pulls?state=open", token), sha)
+                               open_pull_requests(repo, token), sha)
             # Resolve both destinations before reading reviews, so an API
             # failure also replaces any earlier green merge gate.
             publish_refs.update(ref for pr in prs
@@ -691,7 +698,7 @@ def reconcile_open(repo: str, token: str, dry_run: bool, sha: str | None = None,
 
     if sha:
         try:
-            prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
+            prs = open_pull_requests(repo, token)
             try:
                 heads = resolve_review_heads(repo, review_run, token, prs) if review_run else [sha]
             except StaleReviewSignal as exc:
@@ -708,7 +715,7 @@ def reconcile_open(repo: str, token: str, dry_run: bool, sha: str | None = None,
             result = max(result, report(repo, sha, token, dry_run, error=str(exc),
                                         require_ci=require_ci, **contract_args))
     try:
-        prs = _list_all(f"/repos/{repo}/pulls?state=open", token)
+        prs = open_pull_requests(repo, token)
         for head in sorted({pr["head"]["sha"] for pr in prs}):
             refresh(head, prs)
     except (urllib.error.URLError, OSError, ValueError, TypeError, AttributeError, KeyError) as exc:
@@ -758,7 +765,7 @@ def main(argv: list[str]) -> int:
                               require_ci=args.require_ci)
     if args.review_run:
         try:
-            prs = _list_all(f"/repos/{args.repo}/pulls?state=open", token)
+            prs = open_pull_requests(args.repo, token)
             try:
                 heads = resolve_review_heads(args.repo, args.review_run, token, prs)
             except StaleReviewSignal as exc:

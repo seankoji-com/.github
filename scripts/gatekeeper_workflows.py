@@ -15,6 +15,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.parse
 
 # The gate's own caller workflow. Its run must never be inventoried or required.
@@ -283,11 +284,39 @@ def collect_for_ref(get, batch_fn, repo: str, ref: str, token: str, *,
     return runs, statuses, suites
 
 
+def pull_requests_disabled(get, repo: str, token: str) -> bool:
+    """True only when repository metadata confirms the Pull Requests feature is off."""
+    metadata = get(f"/repos/{repo}", token)
+    return isinstance(metadata, dict) and metadata.get("has_pull_requests") is False
+
+
+def list_all(get, batch_fn, path: str, token: str, key: str = "") -> list[dict]:
+    """Every page of a paginated list endpoint."""
+    items, page = [], 1
+    separator = "&" if "?" in path else "?"
+    while True:
+        batch = get(f"{path}{separator}per_page=100&page={page}", token)
+        batch = batch_fn(batch, key) if key else batch
+        if not isinstance(batch, list) or not all(isinstance(i, dict) for i in batch):
+            raise ValueError("invalid paginated list response")
+        items.extend(batch)
+        if len(batch) < 100:
+            return items
+        page += 1
+
+
 def open_pr_ref(get, repo: str, sha: str, token: str) -> str | None:
     """Return the URL-encoded branch ref for an open PR at `sha`, if any."""
     page = 1
     while True:
-        prs = get(f"/repos/{repo}/pulls?state=open&per_page=100&page={page}", token)
+        try:
+            prs = get(f"/repos/{repo}/pulls?state=open&per_page=100&page={page}", token)
+        except urllib.error.HTTPError as exc:
+            # A repository that takes no PRs has no branch ref to offer; the
+            # caller keeps its original check-run error instead of this 404.
+            if exc.code == 404 and pull_requests_disabled(get, repo, token):
+                return None
+            raise
         if not isinstance(prs, list):
             raise ValueError("invalid open PR response")
         for pr in prs:
