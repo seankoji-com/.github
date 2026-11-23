@@ -288,15 +288,15 @@ per-head admission. A repo-wide admission group can replace one PR's pending
 refresh with another PR's, and nothing would then re-evaluate the first PR. In
 `event` mode the job fails before evaluation without a 40-hex `head_sha`.
 
-A repository with the Pull Requests feature disabled answers 404 for `/pulls`.
-The evaluator reads that as no open PR, after the repository's
-`has_pull_requests` confirms the feature is off, so push heads there still get
-a verdict. Any other 404 and every other read failure keeps failing closed.
-
 The gate also waits for the latest Actions runs on the evaluated commit,
 including queued workflows that have not created job checks yet. It cannot
 detect a test workflow that was never triggered; keep required test callers
 and their trigger coverage under repository review.
+
+Any evaluator run that lists open PRs reads a 404 from `/pulls` as no open PR
+when the repository's `has_pull_requests` confirms the feature is off, so a
+push head in that repository still gets a verdict. Every other 404 and read
+failure keeps failing closed.
 
 The retired OpenCode greenkeeper signal is the one exception. Its reusable
 workflow and callers were removed in November 2026; the exception remains so

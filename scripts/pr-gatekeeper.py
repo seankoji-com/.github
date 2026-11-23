@@ -254,7 +254,18 @@ def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | Non
 
 
 def _open_pr_ref(repo: str, sha: str, token: str) -> str | None:
-    return workflows.open_pr_ref(_get, repo, sha, token)
+    """Resolve a branch ref, or none when the repository takes no PRs.
+
+    A repository with the Pull Requests feature disabled answers 404 for the
+    /pulls listing this fallback needs. It has no branch ref to offer, so the
+    caller keeps its original check-run error instead of a misleading 404.
+    """
+    try:
+        return workflows.open_pr_ref(_get, repo, sha, token)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 404 or not _pull_requests_disabled(repo, token):
+            raise
+        return None
 
 
 def collect(repo: str, sha: str, token: str, *, inventory: dict | None = None) -> tuple[list, dict, list]:
@@ -318,6 +329,12 @@ def _list_all(path: str, token: str, key: str = "") -> list[dict]:
         page += 1
 
 
+def _pull_requests_disabled(repo: str, token: str) -> bool:
+    """True only when repository metadata confirms the Pull Requests feature is off."""
+    metadata = _get(f"/repos/{repo}", token)
+    return isinstance(metadata, dict) and metadata.get("has_pull_requests") is False
+
+
 def open_pull_requests(repo: str, token: str) -> list[dict]:
     """Every open PR, or none when the repository has Pull Requests disabled.
 
@@ -331,10 +348,7 @@ def open_pull_requests(repo: str, token: str) -> list[dict]:
     try:
         return _list_all(f"/repos/{repo}/pulls?state=open", token)
     except urllib.error.HTTPError as exc:
-        if exc.code != 404:
-            raise
-        metadata = _get(f"/repos/{repo}", token)
-        if not isinstance(metadata, dict) or metadata.get("has_pull_requests") is not False:
+        if exc.code != 404 or not _pull_requests_disabled(repo, token):
             raise
         return []
 

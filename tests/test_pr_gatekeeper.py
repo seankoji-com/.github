@@ -1594,6 +1594,32 @@ class TestRepositoryWithoutPullRequests(unittest.TestCase):
                     pr_gatekeeper.open_pull_requests("demo/repo", "token")
             self.assertEqual(get.call_count, 1)
 
+    def test_sha_fallback_reads_a_disabled_feature_as_no_pr(self):
+        # collect() retries a rejected SHA through open_pr_ref; that listing
+        # must tolerate the same disabled feature.
+        with patch.object(pr_gatekeeper, "_get", side_effect=self.api({"has_pull_requests": False})):
+            self.assertIsNone(pr_gatekeeper._open_pr_ref("demo/repo", "head", "token"))
+
+    def test_sha_fallback_still_fails_closed_when_the_feature_is_on(self):
+        with patch.object(pr_gatekeeper, "_get", side_effect=self.api({"has_pull_requests": True})):
+            with self.assertRaises(urllib.error.HTTPError):
+                pr_gatekeeper._open_pr_ref("demo/repo", "head", "token")
+
+    def test_unreadable_checks_keep_the_original_error_when_pulls_are_disabled(self):
+        missing = urllib.error.HTTPError("https://api.github.com/test", 404, "No commit found", {}, None)
+
+        def get(path, token):
+            if "/pulls?" in path:
+                raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+            self.assertEqual(path, "/repos/demo/repo")
+            return {"has_pull_requests": False}
+
+        with patch.object(pr_gatekeeper, "_get", side_effect=get), \
+             patch.object(pr_gatekeeper, "_collect_for_ref", side_effect=missing):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                pr_gatekeeper.collect("demo/repo", "head", "token")
+        self.assertIs(caught.exception, missing)
+
     def test_require_ci_evaluates_a_push_head_instead_of_failing_the_gate(self):
         with patch.dict(pr_gatekeeper.os.environ, {"PERSONA_REVIEW_REQUIRED": "false"}), \
              patch.object(pr_gatekeeper, "_get", side_effect=self.api({"has_pull_requests": False})), \
