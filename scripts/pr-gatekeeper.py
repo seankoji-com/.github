@@ -254,18 +254,7 @@ def _collect_for_ref(repo: str, ref: str, token: str, *, workflow_sha: str | Non
 
 
 def _open_pr_ref(repo: str, sha: str, token: str) -> str | None:
-    """Resolve a branch ref, or none when the repository takes no PRs.
-
-    A repository with the Pull Requests feature disabled answers 404 for the
-    /pulls listing this fallback needs. It has no branch ref to offer, so the
-    caller keeps its original check-run error instead of a misleading 404.
-    """
-    try:
-        return workflows.open_pr_ref(_get, repo, sha, token)
-    except urllib.error.HTTPError as exc:
-        if exc.code != 404 or not _pull_requests_disabled(repo, token):
-            raise
-        return None
+    return workflows.open_pr_ref(_get, repo, sha, token)
 
 
 def collect(repo: str, sha: str, token: str, *, inventory: dict | None = None) -> tuple[list, dict, list]:
@@ -316,23 +305,7 @@ def persona_marker(number: int, verdict: tuple[str, str | None]) -> str:
 
 
 def _list_all(path: str, token: str, key: str = "") -> list[dict]:
-    items, page = [], 1
-    separator = "&" if "?" in path else "?"
-    while True:
-        batch = _get(f"{path}{separator}per_page=100&page={page}", token)
-        batch = _batch(batch, key) if key else batch
-        if not isinstance(batch, list) or not all(isinstance(i, dict) for i in batch):
-            raise ValueError("invalid paginated list response")
-        items.extend(batch)
-        if len(batch) < 100:
-            return items
-        page += 1
-
-
-def _pull_requests_disabled(repo: str, token: str) -> bool:
-    """True only when repository metadata confirms the Pull Requests feature is off."""
-    metadata = _get(f"/repos/{repo}", token)
-    return isinstance(metadata, dict) and metadata.get("has_pull_requests") is False
+    return workflows.list_all(_get, _batch, path, token, key=key)
 
 
 def open_pull_requests(repo: str, token: str) -> list[dict]:
@@ -341,14 +314,13 @@ def open_pull_requests(repo: str, token: str) -> list[dict]:
     GitHub answers 404 for /pulls on a repository whose Pull Requests feature is
     off. Such a repository has no PR head to gate, and the gate still evaluates
     its push heads, so that 404 reads as an empty list instead of failing the
-    evaluation. Every other 404 — a wrong repository, a token without
-    pull-requests access — keeps failing closed: repository metadata must
+    evaluation. Every other 404 keeps failing closed: repository metadata must
     confirm `has_pull_requests: false` before the 404 is trusted.
     """
     try:
         return _list_all(f"/repos/{repo}/pulls?state=open", token)
     except urllib.error.HTTPError as exc:
-        if exc.code != 404 or not _pull_requests_disabled(repo, token):
+        if exc.code != 404 or not workflows.pull_requests_disabled(_get, repo, token):
             raise
         return []
 
